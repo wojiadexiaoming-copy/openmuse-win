@@ -1042,26 +1042,126 @@ class AgentServer:
                     pass
             return os.environ.get("ALTEREGO_LLM_API_KEY", "").strip()
 
+        def _extract_roles_info() -> dict:
+            """提取各角色的当前生效模型与端点信息。"""
+            current = self._model_name(self.llm)
+            roles_cfg = self.cfg.get("models", {}).get("roles", {})
+            main_cfg = roles_cfg.get("main") or self.cfg.get("llm", {})
+            fb_cfg = self.cfg.get("llm", {}).get("fallback") or main_cfg.get("fallback", {})
+
+            planner_cfg = roles_cfg.get("planner", {})
+            if isinstance(planner_cfg, dict) and "ref" in planner_cfg:
+                ref_role = planner_cfg["ref"]
+                ref_cfg = roles_cfg.get(ref_role) or main_cfg
+                planner_model = ref_cfg.get("model", current)
+                planner_url = ref_cfg.get("base_url", "")
+            else:
+                planner_model = planner_cfg.get("model", current) if isinstance(planner_cfg, dict) else current
+                planner_url = planner_cfg.get("base_url", "") if isinstance(planner_cfg, dict) else ""
+
+            worker_cfg = roles_cfg.get("worker", {}) if isinstance(roles_cfg.get("worker"), dict) else {}
+            sub_cfg = roles_cfg.get("subagent", {}) if isinstance(roles_cfg.get("subagent"), dict) else {}
+
+            return {
+                "main": {
+                    "name": "👑 主脑 (Main Brain)",
+                    "desc": "核心对话、意图识别与任务调度",
+                    "model": main_cfg.get("model", current),
+                    "base_url": main_cfg.get("base_url", ""),
+                    "supports_images": main_cfg.get("supports_images", True),
+                },
+                "worker": {
+                    "name": "⚡ 后台工作者 (Worker)",
+                    "desc": "记忆沉淀、历史提炼与上下文压缩",
+                    "model": worker_cfg.get("model", main_cfg.get("model", current)),
+                    "base_url": worker_cfg.get("base_url", main_cfg.get("base_url", "")),
+                    "supports_images": worker_cfg.get("supports_images", False),
+                },
+                "subagent": {
+                    "name": "🤖 子任务智能体 (Subagent)",
+                    "desc": "专注复杂单项任务、长文档分析与工具链",
+                    "model": sub_cfg.get("model", main_cfg.get("model", current)),
+                    "base_url": sub_cfg.get("base_url", main_cfg.get("base_url", "")),
+                    "supports_images": sub_cfg.get("supports_images", True),
+                },
+                "planner": {
+                    "name": "📋 任务规划器 (Planner)",
+                    "desc": "长程复杂任务分解与甘特图规划",
+                    "model": planner_model,
+                    "base_url": planner_url,
+                    "supports_images": False,
+                },
+                "fallback": {
+                    "name": "🛡️ 容灾兜底 (Fallback)",
+                    "desc": "主模型故障或遇到速率限制时自动接管",
+                    "model": fb_cfg.get("model", "") if fb_cfg.get("enabled", True) else "",
+                    "base_url": fb_cfg.get("base_url", "") if fb_cfg.get("enabled", True) else "",
+                    "enabled": fb_cfg.get("enabled", True),
+                    "supports_images": fb_cfg.get("supports_images", False),
+                }
+            }
+
+        def _persist_config_roles():
+            """将角色与模型更新安全持久化到根目录 config.yaml 中（保留所有注释与排版）。"""
+            try:
+                from ruamel.yaml import YAML
+                yaml_loader = YAML()
+                yaml_loader.preserve_quotes = True
+                cfg_path = REPO_ROOT / "config.yaml"
+                if cfg_path.is_file():
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        disk_data = yaml_loader.load(f) or {}
+                    disk_data.setdefault("models", {}).setdefault("roles", {})
+                    for rk, rv in self.cfg.get("models", {}).get("roles", {}).items():
+                        if isinstance(rv, dict):
+                            disk_data["models"]["roles"].setdefault(rk, {})
+                            if "model" in rv:
+                                disk_data["models"]["roles"][rk]["model"] = rv["model"]
+                            if "base_url" in rv:
+                                disk_data["models"]["roles"][rk]["base_url"] = rv["base_url"]
+                            if "supports_images" in rv:
+                                disk_data["models"]["roles"][rk]["supports_images"] = rv["supports_images"]
+                            if "ref" in rv:
+                                disk_data["models"]["roles"][rk]["ref"] = rv["ref"]
+                            elif "ref" in disk_data["models"]["roles"][rk]:
+                                del disk_data["models"]["roles"][rk]["ref"]
+                    if "llm" in self.cfg and "llm" in disk_data:
+                        disk_data["llm"]["model"] = self.cfg["llm"].get("model")
+                        disk_data["llm"]["base_url"] = self.cfg["llm"].get("base_url")
+                        if "fallback" in self.cfg["llm"]:
+                            disk_data["llm"].setdefault("fallback", {})
+                            disk_data["llm"]["fallback"]["model"] = self.cfg["llm"]["fallback"].get("model")
+                            disk_data["llm"]["fallback"]["base_url"] = self.cfg["llm"]["fallback"].get("base_url")
+                            disk_data["llm"]["fallback"]["enabled"] = self.cfg["llm"]["fallback"].get("enabled", True)
+                    with open(cfg_path, "w", encoding="utf-8") as f:
+                        yaml_loader.dump(disk_data, f)
+            except Exception as exc:
+                logger.warning("持久化 config.yaml 角色配置异常: %s", exc)
+
         @app.route("/api/models", method="GET")
         def list_models():
-            """前端查询可用模型列表 + 当前主模型（动态组装与暴露）。"""
+            """前端查询可用模型列表 + 各角色当前生效模型矩阵（动态组装与暴露）。"""
             current = self._model_name(self.llm)
             all_models = _get_dynamic_models()
             public = [{k: v for k, v in m.items() if not k.startswith("key_") and k != "vault_key"}
                       for m in all_models]
             for m in public:
                 m["has_key"] = bool(_resolve_model_key(m))
-            return {"current": current, "models": public}
+            return {"current": current, "models": public, "roles": _extract_roles_info()}
 
         @app.route("/api/settings/save_model_config", method="POST")
         @app.route("/api/switch_model", method="POST")
         def switch_or_save_model():
-            """保存大模型参数与 API Key，并即时热切换生效，无需重启。"""
+            """保存大模型参数与 API Key，支持按角色分级绑定（主脑/后台Worker/子智能体/规划器/容灾兜底）。"""
             from bottle import request
             data = request.json or {}
             model_id = str(data.get("model_id") or data.get("model") or "").strip()
             if not model_id:
                 return {"ok": False, "error": "模型标识不能为空"}
+
+            target_role = str(data.get("target_role") or "main").strip().lower()
+            if target_role not in {"main", "worker", "subagent", "planner", "fallback", "all"}:
+                target_role = "main"
 
             base_url = str(data.get("base_url") or "").strip()
             api_key = str(data.get("api_key") or "").strip()
@@ -1069,7 +1169,15 @@ class AgentServer:
             # 1. 如果用户录入了新的 API Key，立即使用 Windows DPAPI 加密存入 Vault
             vault = getattr(self, "vault", None)
             if api_key and vault and hasattr(vault, "set"):
-                vault.set("llm_api_key", api_key)
+                # 如果是全局或主脑，存为主 key
+                if target_role in ("main", "all"):
+                    vault.set("llm_api_key", api_key)
+                elif target_role == "fallback":
+                    vault.set("backup_llm_api_key", api_key)
+                else:
+                    vault.set(f"{target_role}_api_key", api_key)
+
+                # 按厂商类型智能补存专属命名 key
                 mid_lower = model_id.lower()
                 burl_lower = (base_url or "").lower()
                 if "agnes" in mid_lower or "agnes" in burl_lower:
@@ -1090,6 +1198,11 @@ class AgentServer:
                 elif "deepseek" in mid_lower or "deepseek" in burl_lower:
                     try:
                         vault.set("deepseek_api_key", api_key)
+                    except Exception:
+                        pass
+                elif "echobird" in mid_lower or "127.0.0.1:53683" in burl_lower or "eb-local" in api_key:
+                    try:
+                        vault.set("echobird_api_key", api_key)
                     except Exception:
                         pass
 
@@ -1134,41 +1247,103 @@ class AgentServer:
                     "error": f"模型 {model_id} 没有可用 API Key，请在下方录入密钥后保存"
                 }
 
-            # 更新内存中的配置（setdefault 防御缺字段的旧 config）
-            self.cfg.setdefault("llm", {})["model"] = target["id"]
-            self.cfg["llm"]["base_url"] = target["base_url"]
-            if "supports_images" in target:
-                self.cfg["llm"]["supports_images"] = target["supports_images"]
+            # 2. 按角色分级更新配置字典
             roles = self.cfg.setdefault("models", {}).setdefault("roles", {})
-            roles.setdefault("main", {})["model"] = target["id"]
-            roles["main"]["base_url"] = target["base_url"]
-            if "supports_images" in target:
-                roles["main"]["supports_images"] = target["supports_images"]
+            supports_img = bool(target.get("supports_images", True))
 
-            # 重建客户端（无需重启），传入目标模型的 key
-            try:
-                with self.turn_lock:
-                    self._reload_model_clients(api_key_override=model_key)
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
+            if target_role == "worker":
+                roles.setdefault("worker", {})["model"] = target["id"]
+                roles["worker"]["base_url"] = target["base_url"]
+                roles["worker"]["supports_images"] = bool(data.get("supports_images", False))
+            elif target_role == "subagent":
+                roles.setdefault("subagent", {})["model"] = target["id"]
+                roles["subagent"]["base_url"] = target["base_url"]
+                roles["subagent"]["supports_images"] = supports_img
+            elif target_role == "planner":
+                if "ref" in roles.get("planner", {}):
+                    del roles["planner"]["ref"]
+                roles.setdefault("planner", {})["model"] = target["id"]
+                roles["planner"]["base_url"] = target["base_url"]
+                roles["planner"]["supports_images"] = False
+                try:
+                    planner_llm = LLMClient.for_role(self.cfg, "planner", self.vault)
+                    self._bind_model_observer(planner_llm, "planner")
+                    self.planner = Planner(planner_llm)
+                    self.orch.planner = self.planner
+                except Exception as exc:
+                    logger.warning("重新加载 Planner 模型失败: %s", exc)
+            elif target_role == "fallback":
+                self.cfg.setdefault("llm", {}).setdefault("fallback", {})["model"] = target["id"]
+                self.cfg["llm"]["fallback"]["base_url"] = target["base_url"]
+                self.cfg["llm"]["fallback"]["enabled"] = True
+                self.cfg["llm"]["fallback"]["supports_images"] = False
+                roles.setdefault("main", {}).setdefault("fallback", {})["model"] = target["id"]
+                roles["main"]["fallback"]["base_url"] = target["base_url"]
+                roles["main"]["fallback"]["enabled"] = True
+                roles["main"]["fallback"]["supports_images"] = False
+                try:
+                    with self.turn_lock:
+                        self._reload_model_clients()
+                except Exception as exc:
+                    return {"ok": False, "error": f"重载容灾兜底客户端失败: {exc}"}
+            elif target_role == "all":
+                self.cfg.setdefault("llm", {})["model"] = target["id"]
+                self.cfg["llm"]["base_url"] = target["base_url"]
+                self.cfg["llm"]["supports_images"] = supports_img
+                for r in ("main", "worker", "subagent", "planner"):
+                    if r == "planner" and "ref" in roles.get("planner", {}):
+                        del roles["planner"]["ref"]
+                    roles.setdefault(r, {})["model"] = target["id"]
+                    roles[r]["base_url"] = target["base_url"]
+                    roles[r]["supports_images"] = supports_img
+                try:
+                    with self.turn_lock:
+                        self._reload_model_clients(api_key_override=model_key)
+                except Exception as exc:
+                    return {"ok": False, "error": str(exc)}
+            else:  # "main"
+                self.cfg.setdefault("llm", {})["model"] = target["id"]
+                self.cfg["llm"]["base_url"] = target["base_url"]
+                self.cfg["llm"]["supports_images"] = supports_img
+                roles.setdefault("main", {})["model"] = target["id"]
+                roles["main"]["base_url"] = target["base_url"]
+                roles["main"]["supports_images"] = supports_img
+                try:
+                    with self.turn_lock:
+                        self._reload_model_clients(api_key_override=model_key)
+                except Exception as exc:
+                    return {"ok": False, "error": str(exc)}
 
-            self.state_snapshot["status"]["current_model"] = target["id"]
-            self.emit_event("model_switched", {"model": target["id"], "base_url": target["base_url"]})
+            # 3. 持久化到 config.yaml
+            _persist_config_roles()
+
+            if target_role in ("main", "all"):
+                self.state_snapshot["status"]["current_model"] = target["id"]
+
+            self.emit_event("model_switched", {
+                "target_role": target_role,
+                "model": target["id"],
+                "base_url": target["base_url"]
+            })
 
             import logging as _log
             _log.getLogger(__name__).info(
-                "[switch_model] 主模型与密钥已关联保存生效: %s (base_url: %s)", target["id"], target["base_url"])
+                "[switch_model] 角色 [%s] 模型已成功更新生效: %s (base_url: %s)",
+                target_role, target["id"], target["base_url"])
 
             updated_models = [{k: v for k, v in m.items() if not k.startswith("key_") and k != "vault_key"}
                               for m in _get_dynamic_models()]
             for m in updated_models:
                 m["has_key"] = bool(_resolve_model_key(m))
+
             return {
                 "ok": True,
-                "current": target["id"],
+                "current": self._model_name(self.llm),
+                "target_role": target_role,
                 "base_url": target["base_url"],
                 "has_key": True,
-                "models": updated_models
+                "models": updated_models,
+                "roles": _extract_roles_info()
             }
 
         @app.route("/api/models/<model_id:path>", method="DELETE")

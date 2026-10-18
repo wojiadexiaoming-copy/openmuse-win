@@ -511,18 +511,40 @@
             </div>
           </div>
           <p class="text-xs text-[#8E8E93] leading-relaxed">
-            模型标识、API 基础地址与 API Key 联动绑定。保存时密钥由 Windows 内置 Crypt32.dll 硬件级加密落盘，永不泄露明文。
+            支持按角色独立分级绑定（主脑、后台工作者、子任务、规划器与容灾兜底）。保存时密钥由 Windows 内置 Crypt32.dll 硬件级加密落盘，永不泄露明文。
           </p>
 
-          <div class="grid grid-cols-2 gap-3">
+          <!-- 各角色当前模型绑定拓扑卡片 -->
+          <div class="space-y-1.5 pt-1">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-semibold text-[#4B5563]">当前各角色分级绑定拓扑 (点击卡片直接载入编辑)</span>
+              <span class="text-[11px] text-blue-600 font-medium">按角色独立调度与降级</span>
+            </div>
+            <div id="role-matrix-cards" class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              <div class="p-2 rounded-lg bg-[#F9F9FB] border border-[#EAEAEA] text-center text-xs text-[#8E8E93]">加载中...</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-[#4B5563] mb-1">生效目标角色 (Role)</label>
+              <select id="setting-target-role" class="w-full px-3 py-1.5 bg-[#F9F9FB] focus:bg-white rounded-lg border border-[#EAEAEA] focus:border-[#18181B] text-xs transition focus:outline-none font-medium text-[#1D1D1F]">
+                <option value="main">👑 主脑 (Main Brain)</option>
+                <option value="worker">⚡ 后台工作者 (Worker - 记忆提炼)</option>
+                <option value="subagent">🤖 子任务 (Subagent)</option>
+                <option value="planner">📋 规划器 (Planner)</option>
+                <option value="fallback">🛡️ 容灾兜底 (Fallback)</option>
+                <option value="all">🌐 全部角色统一绑定 (All)</option>
+              </select>
+            </div>
             <div>
               <label class="block text-xs font-medium text-[#4B5563] mb-1">模型标识 (Model ID)</label>
-              <input type="text" id="setting-model" list="preset-models-datalist" placeholder="例如: agnes-3.0-flash 或 qwen3.8-omni-flash" class="w-full px-3 py-1.5 bg-[#F9F9FB] focus:bg-white rounded-lg border border-[#EAEAEA] focus:border-[#18181B] text-xs transition focus:outline-none">
+              <input type="text" id="setting-model" list="preset-models-datalist" placeholder="例如: agnes-3.0-flash 或 auto" class="w-full px-3 py-1.5 bg-[#F9F9FB] focus:bg-white rounded-lg border border-[#EAEAEA] focus:border-[#18181B] text-xs transition focus:outline-none">
               <datalist id="preset-models-datalist"></datalist>
             </div>
             <div>
               <label class="block text-xs font-medium text-[#4B5563] mb-1">API 基础地址 (Base URL)</label>
-              <input type="text" id="setting-base-url" placeholder="例如: https://apihub.agnes-ai.com/v1" class="w-full px-3 py-1.5 bg-[#F9F9FB] focus:bg-white rounded-lg border border-[#EAEAEA] focus:border-[#18181B] text-xs transition focus:outline-none">
+              <input type="text" id="setting-base-url" placeholder="例如: http://127.0.0.1:53683/v1" class="w-full px-3 py-1.5 bg-[#F9F9FB] focus:bg-white rounded-lg border border-[#EAEAEA] focus:border-[#18181B] text-xs transition focus:outline-none">
             </div>
           </div>
 

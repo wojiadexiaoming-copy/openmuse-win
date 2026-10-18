@@ -514,6 +514,59 @@ function closeMemoryModal() {
 
 /* ================= 6. 模型热切换体系 ================= */
 let currentModelSearchQuery = "";
+let currentRolesInfo = {};
+
+function renderRoleMatrix(roles) {
+  if (!roles || typeof roles !== "object") return;
+  currentRolesInfo = roles;
+  const container = document.getElementById("role-matrix-cards");
+  if (!container) return;
+
+  const roleOrder = ["main", "worker", "subagent", "planner", "fallback"];
+  const targetRoleSelect = document.getElementById("setting-target-role");
+  const selectedRole = targetRoleSelect ? targetRoleSelect.value : "main";
+
+  container.innerHTML = roleOrder.map(rKey => {
+    const r = roles[rKey];
+    if (!r) return "";
+    const isSelected = (selectedRole === rKey);
+    const shortUrl = (r.base_url || "").replace(/^https?:\/\//, "").replace(/\/v1\/?$/, "");
+    const roleIcon = {
+      main: "👑",
+      worker: "⚡",
+      subagent: "🤖",
+      planner: "📋",
+      fallback: "🛡️"
+    }[rKey] || "🎯";
+    const displayName = (r.name || rKey).split(" ")[0];
+
+    return `
+      <div onclick="selectTargetRoleForEdit('${rKey}')" class="p-2 rounded-xl border transition cursor-pointer flex flex-col justify-between ${isSelected ? 'border-blue-600 bg-blue-50/40 shadow-sm' : 'border-[#EAEAEA] bg-[#F9F9FB] hover:border-gray-300'}">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-[11px] font-bold text-[#1D1D1F] truncate">${esc(displayName)}</span>
+          <span class="text-[9.5px] px-1 py-0.2 rounded font-medium ${isSelected ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600'}">${rKey}</span>
+        </div>
+        <div class="text-[12px] font-semibold text-[#18181B] truncate" title="${esc(r.model || '未绑定')}">${esc(r.model || '未绑定')}</div>
+        <div class="text-[10px] text-[#8E8E93] truncate mt-0.5" title="${esc(r.base_url || '')}">${esc(shortUrl || '默认端点')}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+function selectTargetRoleForEdit(rKey) {
+  const select = document.getElementById("setting-target-role");
+  if (select) {
+    select.value = rKey;
+  }
+  const r = currentRolesInfo[rKey];
+  if (r) {
+    const modelInput = document.getElementById("setting-model");
+    const urlInput = document.getElementById("setting-base-url");
+    if (modelInput && r.model) modelInput.value = r.model;
+    if (urlInput && r.base_url) urlInput.value = r.base_url;
+  }
+  renderRoleMatrix(currentRolesInfo);
+}
 
 async function loadAvailableModels() {
   try {
@@ -523,6 +576,9 @@ async function loadAvailableModels() {
     updateCurrentModelUI(current);
     renderModelDropdownList(current, currentModelSearchQuery);
     populateSettingsModelDatalist(availableModels);
+    if (res.roles) {
+      renderRoleMatrix(res.roles);
+    }
   } catch (e) {
     console.warn("加载模型列表失败:", e);
   }
@@ -2244,13 +2300,30 @@ function bindSettingsControls() {
     modelInput.addEventListener("change", handleModelInput);
   }
 
-  // 4. 单一核心保存按钮：保存并立即生效（同时绑定 Model ID、Base URL 与 API Key）
+  // 3. 目标角色下拉联动
+  const targetRoleSelect = document.getElementById("setting-target-role");
+  if (targetRoleSelect) {
+    targetRoleSelect.onchange = () => {
+      const rKey = targetRoleSelect.value;
+      if (currentRolesInfo && currentRolesInfo[rKey]) {
+        const r = currentRolesInfo[rKey];
+        const mInput = document.getElementById("setting-model");
+        const uInput = document.getElementById("setting-base-url");
+        if (mInput && r.model) mInput.value = r.model;
+        if (uInput && r.base_url) uInput.value = r.base_url;
+      }
+      renderRoleMatrix(currentRolesInfo);
+    };
+  }
+
+  // 4. 单一核心保存按钮：保存并立即生效（支持按角色分级绑定）
   const saveConfigBtn = document.getElementById("btn-save-model-config");
   if (saveConfigBtn) {
     saveConfigBtn.onclick = async () => {
       const model = (document.getElementById("setting-model")?.value || "").trim();
       const baseUrl = (document.getElementById("setting-base-url")?.value || "").trim();
       const apiKey = (document.getElementById("setting-api-key")?.value || "").trim();
+      const targetRole = (document.getElementById("setting-target-role")?.value || "main").trim();
 
       if (!model) {
         toast("请输入或选择模型标识 (Model ID)");
@@ -2262,7 +2335,7 @@ function bindSettingsControls() {
       saveConfigBtn.innerHTML = `<span>⏳ 保存并生效中…</span>`;
 
       try {
-        const payload = { model: model, base_url: baseUrl };
+        const payload = { model: model, base_url: baseUrl, target_role: targetRole };
         if (apiKey) payload.api_key = apiKey;
 
         const res = await api("/api/settings/save_model_config", {
@@ -2280,12 +2353,24 @@ function bindSettingsControls() {
             renderModelDropdownList(res.current, currentModelSearchQuery);
             populateSettingsModelDatalist(availableModels);
           }
+          if (res.roles) {
+            renderRoleMatrix(res.roles);
+          }
           const keyStatus = document.getElementById("setting-key-status");
           if (keyStatus) {
             keyStatus.className = "text-xs text-[#10B981] font-medium";
             keyStatus.textContent = "✓ 已配置硬件加密凭证 (留空保持现有密钥)";
           }
-          toast(`✓ 模型与密钥已成功关联保存，主模型已即时生效为 ${res.current}！`);
+          const roleNames = {
+            main: "👑 主脑智能体 (Main Brain)",
+            worker: "⚡ 后台工作者 (Worker)",
+            subagent: "🤖 子任务智能体 (Subagent)",
+            planner: "📋 任务规划器 (Planner)",
+            fallback: "🛡️ 容灾兜底 (Fallback)",
+            all: "🌐 全部角色 (All Roles)"
+          };
+          const roleTitle = roleNames[targetRole] || targetRole;
+          toast(`✓ [${roleTitle}] 已成功关联绑定并热生效为 ${model}！`);
         } else {
           toast("保存失败: " + (res.error || "未知错误"));
         }

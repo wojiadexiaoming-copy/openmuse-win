@@ -390,6 +390,65 @@ def test_unified_save_model_config_with_key(test_server):
     assert s["has_key"] is True
 
 
+def test_per_role_model_binding_and_status(test_server):
+    """测试按角色分级绑定模型：Worker 绑定本地 EchoBird，保持 Main 主脑独立。"""
+    headers = {"Authorization": f"Bearer {test_server.api_token}"}
+
+    # 1. 验证 GET /api/models 正常返回 roles 拓扑
+    status, _, body = _call_api(test_server.app, "GET", "/api/models", headers=headers)
+    assert status.startswith("200")
+    models_data = json.loads(body)
+    assert "roles" in models_data
+    roles = models_data["roles"]
+    assert "main" in roles and "worker" in roles and "subagent" in roles and "fallback" in roles
+
+    # 2. 将 Worker 角色单独绑定到 EchoBird auto
+    worker_payload = {
+        "model": "auto",
+        "base_url": "http://127.0.0.1:53683/v1",
+        "api_key": "eb-local-mock-token-12345",
+        "target_role": "worker"
+    }
+    status, _, body = _call_api(
+        test_server.app,
+        "POST",
+        "/api/settings/save_model_config",
+        headers=headers,
+        body=worker_payload
+    )
+    assert status.startswith("200")
+    res = json.loads(body)
+    assert res["ok"] is True
+    assert res["target_role"] == "worker"
+    assert res["roles"]["worker"]["model"] == "auto"
+    assert res["roles"]["worker"]["base_url"] == "http://127.0.0.1:53683/v1"
+    # 主脑模型未受影响
+    assert res["roles"]["main"]["model"] != "auto"
+
+    # 验证 Worker 专属密钥已入库
+    assert test_server.vault.resolve("worker_api_key", caller="test") == "eb-local-mock-token-12345"
+
+    # 3. 将 Fallback 容灾兜底绑定到 EchoBird auto
+    fb_payload = {
+        "model": "auto",
+        "base_url": "http://127.0.0.1:53683/v1",
+        "target_role": "fallback"
+    }
+    status, _, body = _call_api(
+        test_server.app,
+        "POST",
+        "/api/settings/save_model_config",
+        headers=headers,
+        body=fb_payload
+    )
+    assert status.startswith("200")
+    res_fb = json.loads(body)
+    assert res_fb["ok"] is True
+    assert res_fb["roles"]["fallback"]["model"] == "auto"
+    assert res_fb["roles"]["fallback"]["base_url"] == "http://127.0.0.1:53683/v1"
+
+
+
 
 
 
