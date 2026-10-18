@@ -1,0 +1,96 @@
+# AlterEgo 配置文件
+# 当前接入：主模型 Agnes 3.0 Flash（全模态，稳定极速，无速率限制）
+# 备选主模型：阿里云百炼 qwen3.8-omni-flash / kimi-k3 / qwen3.8-max（可由前端下拉随时无缝热切换）
+# 备用容灾模型：阿里云百炼 Qwen 3.8 Omni Flash
+
+llm:
+  provider: "openai_compatible"
+  base_url: "https://apihub.agnes-ai.com/v1"
+  model: "agnes-3.0-flash"
+  temperature: 0.2
+  max_tokens: 8192
+  supports_images: true
+  fallback:
+    enabled: true
+    provider: "openai_compatible"
+    base_url: "https://apihub.agnes-ai.com/v1"
+    model: "agnes-3.0-flash"
+    temperature: 0.2
+    max_tokens: 8192
+    supports_images: true
+
+# 按角色的模型路由表（主 Agent / Planner / 子 Agent / 后台 Worker）
+models:
+  roles:
+    main:
+      provider: "openai_compatible"
+      base_url: "https://apihub.agnes-ai.com/v1"
+      model: "agnes-3.0-flash"
+      temperature: 0.2
+      max_tokens: 8192
+      supports_images: true
+      fallback:
+        enabled: true
+        provider: "openai_compatible"
+        base_url: "https://apihub.agnes-ai.com/v1"
+        model: "agnes-3.0-flash"
+        temperature: 0.2
+        max_tokens: 8192
+        supports_images: true
+    planner:
+      ref: "main"   # 与主同级，直接复用 main 配置
+    subagent:
+      provider: "openai_compatible"
+      base_url: "https://apihub.agnes-ai.com/v1"
+      model: "agnes-3.0-flash"
+      temperature: 0.2
+      max_tokens: 8192
+      supports_images: true
+      fallback:
+        enabled: true
+        base_url: "https://apihub.agnes-ai.com/v1"
+        model: "agnes-3.0-flash"
+        temperature: 0.2
+        max_tokens: 8192
+        supports_images: true
+    worker:
+      provider: "openai_compatible"
+      base_url: "https://apihub.agnes-ai.com/v1"
+      model: "agnes-3.0-flash"
+      temperature: 0.3
+      max_tokens: 2048
+  critical_subagent_role: "main"
+
+# 图像与视频多模态模型配置（spec §24 / §30）
+media:
+  image_model: "agnes-image-2.5-flash"
+  video_model: "agnes-video-2.5-flash"
+  base_url: "https://apihub.agnes-ai.com/v1"
+
+
+context:
+  max_context_tokens: 128000
+  compact_threshold: 0.8
+  keep_tail_messages: 20
+
+agent:
+  max_iters: 25          # 软上限：到后按进展水位决定续杯或收尾（代替笨计数器）
+  max_iters_hard: 100    # 硬上限：防跑飞的绝对天花板
+  workspace: "."          # file_* 工具允许的根目录
+  parallel_tools: false   # M4 §5.5 工具并行（默认关，串行更稳）
+  task_tracker: true      # §31.6 任务进度后端
+
+tools:
+  shell_exec:
+    enabled: true
+    timeout_sec: 30
+  web_search:
+    enabled: false
+    api_url: ""
+    api_key_env: "ALTEREGO_SEARCH_API_KEY"
+  browser:
+    enabled: true
+    headless: false
+    split_screen: true     # 左右并排分屏：左侧 70% 浏览器实时显示，右侧 30% UI 桌面窗口
+    browser_ratio: 0.70    # 浏览器所占屏幕工作区宽度比例 (0.70 = 70%)
+

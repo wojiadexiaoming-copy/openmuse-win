@@ -1,0 +1,10 @@
+domains:
+  - "openrouter.ai"
+
+state_hints:
+  - "看到 'Sign out' / 工作区列表 / 头像 → 说明当前浏览器已有登录态"
+  - "若当前已登录且用户要求注册新账号 → 须先点击 'Sign out' 退出当前账号，才能访问注册页使用新邮箱填表"
+  - "看到 'Welcome to OpenRouter' 弹窗 → 这是强制新手向导（Onboarding Wizard，5 步问卷），绝无关闭/Dismiss 按钮！必须先点选使用模式（如 Individual）再点击 Next 一路完成向导，严禁寻找关闭按钮"
+
+flows:
+  email_verification_registration: "邮箱验证码注册"

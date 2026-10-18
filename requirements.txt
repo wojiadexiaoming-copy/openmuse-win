@@ -1,0 +1,26 @@
+# AlterEgo 依赖清单（唯一来源）
+# 宿主机和虚拟机共享同一份代码目录，但 venv 必须各机器一份：
+#   ensure_env.bat 会把这里的内容装进本机的 .venv-<COMPUTERNAME>。
+# 版本 = 虚拟机 hyper-y 实测通过的版本（2026-10-17 核对），升级前先两边跑测试。
+
+# ---- 核心（M1）----
+openai==1.99.5
+pyyaml==6.0.2
+httpx==0.28.1
+pytest==8.3.4
+
+# ---- 工具/自动化（M2+）----
+playwright==1.63.0
+pillow==12.3.0
+apscheduler==3.11.3
+sqlalchemy==2.1.4
+qrcode==8.2
+
+# ---- Windows 桌面（宿主机与虚拟机都是 Windows，两侧都要装）----
+pywebview==6.2.1
+pyautogui==0.9.54
+pywinauto==0.6.9
+
+# ---- 可选 ----
+# TTS（agent/tts.py）：未安装时调用会给出 "pip install edge-tts" 指引
+# edge-tts

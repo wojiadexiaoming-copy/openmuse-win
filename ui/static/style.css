@@ -1,0 +1,426 @@
+/* AlterEgo Web UI · Muse 1:1 像素级复刻视觉系统
+ * 规范参考：docs/gemini-code-1792074031376.md & docs/gemini-code-1792074255122.html
+ */
+
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F4F4F5;
+  --bg-tertiary: #EBEBEC;
+  --border-subtle: #EAEAEA;
+  --border-input: #E5E5EA;
+  --text-main: #1D1D1F;
+  --text-muted: #8E8E93;
+  --text-dim: #A1A1AA;
+  --accent-blue: #0066FF;
+  --accent-emerald: #10B981;
+  --accent-amber: #F59E0B;
+  --accent-rose: #E11D48;
+  --accent-indigo: #3730A3;
+  --radius-bubble: 18px;
+  --radius-pill: 9999px;
+  --radius-card: 16px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text-main);
+  background-color: #FFFFFF;
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 桌面无缝一体化标题栏拖拽区域与按钮交互 */
+.pywebview-drag-region {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+#window-controls button,
+#desktop-titlebar button,
+.no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* 隐藏滚动条但保留平滑滚动 */
+.no-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.no-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 9999px;
+}
+.no-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+.no-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 悬浮胶囊精致投影 */
+.pill-shadow {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+.floating-btn-shadow {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+.modal-shadow {
+  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.05);
+}
+
+/* ================= 头像 6 态实时动画 ================= */
+.avatar-agent-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.avatar-ring {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2.5px solid transparent;
+  pointer-events: none;
+  transition: all 0.3s ease;
+}
+
+/* 1. idle: 灰环静止 */
+.avatar-idle .avatar-ring {
+  border-color: #CBD5E1;
+}
+
+/* 2. thinking: 蓝环脉冲呼吸 */
+.avatar-thinking .avatar-ring {
+  border-color: #3B82F6;
+  animation: pulse-ring 1.8s infinite ease-in-out;
+}
+@keyframes pulse-ring {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.7;
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4);
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+    box-shadow: 0 0 12px 2px rgba(59, 130, 246, 0.6);
+  }
+}
+
+/* 3. acting: 绿环旋转弧光 */
+.avatar-acting .avatar-ring {
+  border-color: #10B981;
+  border-top-color: transparent;
+  animation: spin-ring 1s infinite linear;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+}
+@keyframes spin-ring {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 4. awaiting_approval: 橙色闪烁警报 */
+.avatar-awaiting_approval .avatar-ring {
+  border-color: #F59E0B;
+  animation: blink-ring 0.8s infinite ease-in-out;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.7);
+}
+@keyframes blink-ring {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
+/* 5. error: 红色抖动 */
+.avatar-error {
+  animation: shake-avatar 0.5s ease-in-out;
+}
+.avatar-error .avatar-ring {
+  border-color: #EF4444;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.6);
+}
+@keyframes shake-avatar {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
+
+/* 6. done: 翠绿色弹性微弹 */
+.avatar-done {
+  animation: pop-done 0.6s ease-out;
+}
+.avatar-done .avatar-ring {
+  border-color: #10B981;
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.5);
+}
+@keyframes pop-done {
+  0% { transform: scale(0.92); }
+  50% { transform: scale(1.12); }
+  100% { transform: scale(1); }
+}
+
+/* 7. idle-heartbeat: 空闲几秒自然微动眨眼呼吸 */
+.avatar-blink-pulse {
+  animation: avatar-breath 1s ease-in-out;
+}
+@keyframes avatar-breath {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+/* ================= 消息流组件美化 ================= */
+#messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.msg-row {
+  display: flex;
+  width: 100%;
+}
+.msg-row.user {
+  justify-content: flex-end;
+}
+.msg-row.agent {
+  justify-content: flex-start;
+}
+
+/* 助手气泡：浅灰 #F4F4F5，大圆角 18px */
+.bubble-agent {
+  background-color: #F4F4F5;
+  color: #1D1D1F;
+  border-radius: 18px;
+  padding: 12px 16px;
+  font-size: 14.5px;
+  line-height: 1.62;
+  word-break: break-word;
+  user-select: text;
+}
+.bubble-agent:empty {
+  display: none !important;
+}
+
+/* 用户气泡：深色 #18181B，白字，圆角 18px */
+.bubble-user {
+  background-color: #18181B;
+  color: #FFFFFF;
+  border-radius: 18px;
+  padding: 12px 16px;
+  font-size: 14.5px;
+  line-height: 1.62;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* 助手气泡内的嵌套深一度斜体引用容器 (#EBEBEC) */
+.bubble-agent blockquote {
+  margin: 10px 0;
+  background-color: #EBEBEC;
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-style: italic;
+  color: #27272A;
+  font-size: 14px;
+  line-height: 1.65;
+  border-left: none;
+}
+
+/* Markdown 排版细节 */
+.bubble-agent p {
+  margin: 0 0 8px 0;
+}
+.bubble-agent p:last-child {
+  margin-bottom: 0;
+}
+.bubble-agent pre {
+  background: #18181B;
+  color: #F4F4F5;
+  border-radius: 10px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: 13px;
+  margin: 8px 0;
+  font-family: Consolas, "JetBrains Mono", Menlo, monospace;
+}
+.bubble-agent code {
+  font-family: Consolas, "JetBrains Mono", Menlo, monospace;
+  font-size: 13px;
+}
+.bubble-agent :not(pre) > code {
+  background: rgba(0, 0, 0, 0.06);
+  color: #09090B;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.bubble-agent a {
+  color: #0066FF;
+  text-decoration: none;
+}
+.bubble-agent a:hover {
+  text-decoration: underline;
+}
+
+/* 单行工具调用摘要胶囊 */
+.tool-summary-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #52525B;
+  background: #F4F4F5;
+  border: 1px solid #E4E4E7;
+  border-radius: 9999px;
+  padding: 5px 14px;
+  margin: 4px 0;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.tool-summary-pill:hover {
+  background: #E4E4E7;
+  color: #18181B;
+}
+.tool-summary-pill .tag {
+  color: #0066FF;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+/* 审批卡片（Muse 1:1 风格） */
+.approval-card-muse {
+  background: #FFFFFF;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 18px;
+  padding: 18px 20px;
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 2px 6px -1px rgba(0, 0, 0, 0.02);
+  width: 100%;
+  max-width: 540px;
+  margin: 8px 0;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 抽屉过渡动画 */
+.drawer-transition {
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+}
+
+/* Toast 提示 */
+#toast-wrap {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  background: rgba(24, 24, 27, 0.92);
+  backdrop-filter: blur(8px);
+  color: #FFFFFF;
+  font-size: 13.5px;
+  padding: 9px 18px;
+  border-radius: 9999px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  animation: toast-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ================= 响应式视口适配（分屏 30% / 紧凑视口 ~576px） ================= */
+@media (max-width: 768px) {
+  /* 导航栏微调至 48px，留出更多中右工作区 */
+  #nav-sidebar, aside.w-\[56px\] {
+    width: 48px !important;
+  }
+  
+  /* 右侧控制中心自适应 260px~280px，保证左侧聊天区与右侧控制中心和谐分列 */
+  #right-drawer {
+    width: 270px !important;
+    min-width: 240px !important;
+  }
+  
+  /* 聊天区与输入区留白微调，避免 100% 溢出 */
+  #view-chat {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+  
+  /* 顶栏胶囊与按钮微调 */
+  #btn-toggle-sessions {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+  #model-switcher-pill {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+    max-width: 140px;
+  }
+  #model-pill-text {
+    max-width: 85px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  /* 底部胶囊输入框微调 */
+  .bottom-input-wrap {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+  }
+  .bottom-input-pill {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+    gap: 6px !important;
+  }
+}
+
+/* ================= 超紧凑视口适配（分屏 20% / ~273px 极窄视口） ================= */
+@media (max-width: 380px) {
+  #nav-sidebar, aside.w-\[56px\] {
+    width: 44px !important;
+  }
+  #header-session-title {
+    display: none !important;
+  }
+  #btn-toggle-sessions {
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+  }
+  #model-switcher-pill {
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+    max-width: 100px;
+  }
+  #model-pill-text {
+    max-width: 55px;
+  }
+  .bottom-input-wrap {
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+  }
+  .bottom-input-pill {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+    gap: 4px !important;
+  }
+  #view-chat {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+}
+

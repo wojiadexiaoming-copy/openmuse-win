@@ -1,0 +1,19 @@
+# 示例站点适配器（结构示范，不绑定真实站点）
+#
+# 新建适配器：复制本目录改名，填 site.yaml + quirks.md + flows.yaml 即可。
+# 命名：adapters/sites/<小写英文名>/
+
+# 域名匹配（子串，多个都行）
+domains:
+  - "example.com"
+
+# 状态检测提示：告诉模型怎么判断当前处于什么状态
+# （进站后模型按这些提示自行观察判断，不是代码自动检测）
+state_hints:
+  - "看到 dashboard / 用户头像 → 已登录"
+  - "看到 Sign in / Log in 按钮 → 未登录"
+  - "URL 含 /register → 注册页"
+
+# 本站点可用的流程（对应 flows.yaml 里的键，或 strategy/flows.py 的模板名）
+flows:
+  email_verification_registration: "邮箱验证码注册（通用模板）"

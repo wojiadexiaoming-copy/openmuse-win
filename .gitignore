@@ -1,0 +1,57 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+.venv*/
+venv/
+ENV/
+env/
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Databases & Secrets (Strictly Blocked)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+vault/*.bin
+vault-*/
+.api_token
+*.env
+*.env.local
+*.env.*.local
+!*.env.example
+
+# Temporary Runtime Data & Downloads
+downloads/
+screenshots/
+shots/
+shot_*.jpg
+desktop_shot_*.jpg
+scratch/
+archive/
+artifacts/
+logs/
+data/
+workspace/
+weixin/
+
+# Personal Notes & Development Scratch
+*问题*.md
+MEMORY.md
+PROGRESS.md
+LICENSE_STATUS.md
+
+
+# OS Specific
+.DS_Store
+Thumbs.db
+desktop.ini

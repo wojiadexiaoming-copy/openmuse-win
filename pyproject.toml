@@ -1,0 +1,20 @@
+[project]
+name = "alterego"
+version = "0.1.0"
+description = "Windows-native local personal AI agent"
+requires-python = ">=3.11"
+dependencies = [
+    "pyautogui>=0.9.54",
+    "pywinauto>=0.6.9",
+    "qrcode>=8.2",
+]
+
+[project.optional-dependencies]
+windows = [
+    "pywinauto>=0.6.8",
+    "pywebview>=4.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

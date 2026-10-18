@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AlterEgo - 你的数字分身</title>
+  <link rel="icon" type="image/x-icon" href="static/alterego.ico">
+  <link rel="icon" type="image/png" href="static/alterego.png">
+  <script src="static/tailwind.min.js"></script>
+  <link rel="stylesheet" href="static/style.css">
+  <link rel="stylesheet" href="static/highlight-dark.min.css">
+</head>
+<body class="h-screen w-screen flex flex-col bg-white font-sans text-[#1D1D1F] overflow-hidden select-none">
+  <!-- ==================== 0. 现代桌面无缝一体化标题栏 (Modern Desktop Title Bar) ==================== -->
+  <header id="desktop-titlebar" class="w-full h-8 bg-[#FAFAFB] border-b border-[#EAEAEA] flex items-center justify-between px-3 select-none z-50 shrink-0 text-xs text-[#1D1D1F]">
+    <!-- 左侧：品牌 Logo + 应用名称 + 状态指示 -->
+    <div class="flex items-center space-x-2 pywebview-drag-region cursor-default h-full">
+      <img src="static/alterego.png" class="w-4 h-4 rounded shadow-xs" alt="AlterEgo">
+      <span class="font-bold text-[12.5px] tracking-tight text-[#1D1D1F]">AlterEgo</span>
+      <span class="text-[11px] text-[#8E8E93] font-normal">· 你的数字分身</span>
+      <span class="inline-flex items-center px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-50 text-emerald-700 font-medium ml-1">
+        <span class="w-1.5 h-1.5 rounded-full bg-[#10B981] mr-1 animate-pulse"></span>
+        已就绪
+      </span>
+    </div>
+
+    <!-- 中间：宽拖拽区域 -->
+    <div class="flex-1 h-full pywebview-drag-region cursor-default" title="双击最大化/还原，拖拽移动窗口"></div>
+
+    <!-- 右侧：现代原生风窗口控制胶囊 (最小化、最大化/还原、关闭) -->
+    <div id="window-controls" class="flex items-center space-x-1 shrink-0 -mr-1">
+      <button id="btn-win-minimize" onclick="handleWindowControl('minimize')" class="w-7 h-6 flex items-center justify-center rounded hover:bg-[#F4F4F5] text-[#52525B] hover:text-[#18181B] transition" title="最小化">
+        <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M2 8a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 8Z"/>
+        </svg>
+      </button>
+      <button id="btn-win-maximize" onclick="handleWindowControl('maximize')" class="w-7 h-6 flex items-center justify-center rounded hover:bg-[#F4F4F5] text-[#52525B] hover:text-[#18181B] transition" title="最大化 / 还原">
+        <svg id="icon-win-maximize" class="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
+          <rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/>
+        </svg>
+      </button>
+      <button id="btn-win-close" onclick="handleWindowControl('close')" class="w-7 h-6 flex items-center justify-center rounded hover:bg-[#EF4444] text-[#52525B] hover:text-white transition" title="关闭窗口">
+        <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="app" class="flex-1 w-full flex relative overflow-hidden">
+
+  <!-- ==================== 1. 左侧极窄全局导航栏 (56px) ==================== -->
+  <aside id="nav-sidebar" class="w-[56px] h-full border-r border-[#EAEAEA] flex flex-col justify-between items-center py-3 bg-white z-30 shrink-0 relative">
+    <!-- 上半部分：8 个主功能与挂载构件图标 -->
+    <div class="flex flex-col items-center space-y-3 w-full">
+      <!-- 1. 对话 (当前激活态：36px 浅灰圆底) -->
+      <button onclick="switchMainView('chat')" id="nav-chat" class="w-9 h-9 rounded-full bg-[#F4F4F5] flex items-center justify-center text-[#1D1D1F] hover:bg-[#EBEBEC] transition" title="对话">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/>
+        </svg>
+      </button>
+
+      <!-- 2. 全局搜索 -->
+      <button onclick="toggleSearchModal()" id="nav-search" class="w-9 h-9 rounded-full flex items-center justify-center text-[#1D1D1F] hover:bg-[#F4F4F5] transition" title="搜索 (Ctrl+K)">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="7"></circle>
+          <path stroke-linecap="round" d="M20 20l-4-4"></path>
+        </svg>
+      </button>
+
+      <!-- 3. 动态/控制中心抽屉开关 -->
+      <button onclick="toggleRightDrawer()" id="nav-drawer" class="w-9 h-9 rounded-full flex items-center justify-center text-[#1D1D1F] hover:bg-[#F4F4F5] transition" title="智能体控制中心">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <rect x="4" y="4" width="16" height="16" rx="2"></rect>
+          <path d="M9 4v16M14 9h3M14 13h3"></path>
+        </svg>
+      </button>
+
+      <!-- 4. 点子/提示词库 (灯泡) -->
+      <button onclick="switchMainView('ideas')" id="nav-ideas" class="w-9 h-9 rounded-full flex items-center justify-center text-[#1D1D1F] hover:bg-[#F4F4F5] transition" title="点子与提示词库">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 18h6M10 22h4M12 2a7 7 0 00-4 12.74V17a1 1 0 001 1h6a1 1 0 001-1v-2.26A7 7 0 0012 2z"/>
+        </svg>
+      </button>
+
+      <!-- 5. 目标/待办 (勾选方框) -->
+      <button onclick="switchMainView('goals')" id="nav-goals" class="w-9 h-9 rounded-full flex items-center justify-center text-[#1D1D1F] hover:bg-[#F4F4F5] transition" title="目标与待办看板">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <rect x="4" y="4" width="16" height="16" rx="3"></rect>
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4"></path>
+        </svg>
+      </button>
+
+      <!-- 6. 资源库/构件 (几何图形组合) -->
+      <button onclick="switchMainView('library')" id="nav-library" class="w-9 h-9 rounded-full flex items-center justify-center text-[#1D1D1F] hover:bg-[#F4F4F5] transition" title="资源库与构件">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M7 4l4 7H3l4-7z"></path>
+          <circle cx="17" cy="7.5" r="3.5"></circle>
+          <rect x="4" y="14" width="6" height="6" rx="1"></rect>
+          <path stroke-linecap="round" d="M14 14h6v6h-6z"></path>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 下半部分：客户端下载引导与设置菜单 -->
+    <div class="flex flex-col items-center space-y-2 w-full">
+      <!-- 倒数第二：客户端下载引导 -->
+      <button onclick="toggleDownloadPopover()" class="w-9 h-9 rounded-full flex items-center justify-center text-[#1D1D1F] hover:bg-[#F4F4F5] transition" title="随身携带 AlterEgo">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v11m0 0l-3.5-3.5M12 15l3.5-3.5M5 14v4a2 2 0 002 2h10a2 2 0 002-2v-4"/>
+        </svg>
+      </button>
+
+      <!-- 最底部：双横线设置菜单 (=) -->
+      <button onclick="toggleSettingsMenu()" class="w-9 h-9 rounded-full flex items-center justify-center text-[#1D1D1F] hover:bg-[#F4F4F5] transition" title="菜单与系统配置">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <path stroke-linecap="round" d="M5 9h14M5 15h14"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 弹出层 1：随身携带 AlterEgo 下载卡片 -->
+    <div id="download-popover" class="hidden absolute left-[64px] bottom-12 w-[260px] bg-white rounded-2xl border border-[#EAEAEA] pill-shadow p-4 z-50">
+      <div class="flex justify-between items-start mb-1.5">
+        <span class="font-semibold text-[14px] text-[#1D1D1F]">随身携带 AlterEgo</span>
+        <button onclick="toggleDownloadPopover()" class="text-[#8E8E93] hover:text-black text-sm">✕</button>
+      </div>
+      <p class="text-[12.5px] text-[#8E8E93] leading-relaxed mb-3">
+        支持通过手机微信 ClawBot 免键鼠远程收发指令与审批，随时随地继续未完成操作。
+      </p>
+      <button onclick="openSettingsModal(); toggleDownloadPopover();" class="w-full py-2 bg-[#F4F4F5] hover:bg-[#EBEBEC] rounded-xl text-[13px] font-medium text-[#1D1D1F] flex items-center justify-center space-x-1.5 transition">
+        <span>📱</span>
+        <span>绑定微信 / 下载</span>
+      </button>
+    </div>
+
+    <!-- 弹出层 2：左下角菜单 -->
+    <div id="settings-menu" class="hidden absolute left-[64px] bottom-3 w-[220px] bg-white rounded-2xl border border-[#EAEAEA] pill-shadow py-1.5 z-50 text-[13.5px]">
+      <button onclick="toggleSearchModal(); toggleSettingsMenu();" class="w-full px-3.5 py-2 flex justify-between items-center hover:bg-[#F4F4F5] text-left">
+        <span>全局搜索</span>
+        <span class="text-[12px] text-[#8E8E93]">Ctrl+K</span>
+      </button>
+      <button onclick="openSettingsModal(); toggleSettingsMenu();" class="w-full px-3.5 py-2 flex justify-between items-center hover:bg-[#F4F4F5] text-left">
+        <span>微信免键鼠绑定</span>
+      </button>
+      <div class="my-1 border-t border-[#EAEAEA]"></div>
+      <button onclick="openSettingsModal(); toggleSettingsMenu();" class="w-full px-3.5 py-2 flex justify-between items-center hover:bg-[#F4F4F5] text-left font-medium">
+        <span>⚙️ 系统设置与模型</span>
+        <span class="text-[12px] text-[#8E8E93]">Vault</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ==================== 2. 中间主工作区 (Flex-1 自适应) ==================== -->
+  <main class="flex-1 h-full relative flex flex-col bg-white overflow-hidden">
+
+    <!-- 顶部悬浮栏：左「≡ 聊天」胶囊 + 右「主模型切换 / 展开控制中心」胶囊 -->
+    <header class="absolute top-3.5 left-0 right-0 px-5 flex justify-between items-center pointer-events-none z-20">
+      <!-- 左上：聊天抽屉按钮 -->
+      <button onclick="toggleSessionsDrawer()" id="btn-toggle-sessions" class="pointer-events-auto bg-white border border-[#EAEAEA] floating-btn-shadow rounded-full px-3.5 py-1.5 flex items-center space-x-2 hover:bg-[#F9F9FB] transition shrink-0 whitespace-nowrap">
+        <svg class="w-4 h-4 text-[#1D1D1F] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <path stroke-linecap="round" d="M4 7h16M4 12h10M4 17h16"/>
+        </svg>
+        <span id="header-session-title" class="text-[14px] font-medium text-[#1D1D1F] whitespace-nowrap">聊天</span>
+      </button>
+
+      <!-- 右上：当前模型与快速热切换胶囊 + 展开控制中心按钮 -->
+      <div class="flex items-center space-x-2 pointer-events-auto shrink-0">
+        <div class="relative shrink-0">
+          <button onclick="toggleModelDropdown()" id="model-switcher-pill" class="bg-white border border-[#EAEAEA] floating-btn-shadow rounded-full px-3.5 py-1.5 flex items-center space-x-2 hover:bg-[#F9F9FB] transition shrink-0 whitespace-nowrap" title="点击切换主模型">
+            <span class="w-2 h-2 rounded-full bg-[#10B981] shrink-0"></span>
+            <span id="model-pill-text" class="text-[13.5px] font-medium text-[#1D1D1F] whitespace-nowrap">agnes-3.0-flash</span>
+            <svg class="w-3.5 h-3.5 text-[#8E8E93] shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+
+          <!-- 模型下拉菜单 -->
+          <div id="model-switcher-dropdown" class="hidden absolute right-0 mt-2 w-[320px] bg-white rounded-2xl border border-[#EAEAEA] pill-shadow py-2 z-50 text-[13px]">
+            <div class="px-3.5 py-1 text-[11px] font-semibold text-[#8E8E93] uppercase tracking-wider flex justify-between items-center">
+              <span>选择当前主推理模型</span>
+              <span id="model-count-badge" class="text-[10px] px-1.5 py-0.2 rounded bg-gray-100 text-gray-500 font-normal">动态加载</span>
+            </div>
+            <div class="px-3 pt-1.5 pb-2">
+              <input type="text" id="model-search-input" oninput="onModelSearch(this.value)" placeholder="🔍 快速搜索或过滤模型..." class="w-full px-2.5 py-1 text-xs bg-[#F4F4F5] rounded-lg border border-[#EAEAEA] focus:outline-none focus:border-blue-500">
+            </div>
+            <div id="model-list-container" class="space-y-0.5 max-h-[300px] overflow-y-auto no-scrollbar">
+              <!-- JS 动态渲染模型列表 -->
+            </div>
+            <div class="px-3 pt-2 pb-1.5 border-t border-[#EAEAEA]">
+              <div class="text-[11px] font-medium text-[#8E8E93] mb-1.5 flex justify-between items-center">
+                <span>添加自定义模型</span>
+                <span class="text-[10px] text-[#A1A1AA]">实时热生效</span>
+              </div>
+              <div class="flex items-center space-x-1.5">
+                <input type="text" id="input-custom-model-id" placeholder="模型 ID (如 gpt-4o)" class="flex-1 px-2.5 py-1 text-xs bg-[#F4F4F5] rounded-lg border border-[#EAEAEA] focus:outline-none focus:border-blue-500" onkeydown="if(event.key==='Enter')submitCustomModel()">
+                <button onclick="submitCustomModel()" class="px-2.5 py-1 bg-[#18181B] hover:bg-black text-white text-xs font-medium rounded-lg transition shrink-0">
+                  切换
+                </button>
+              </div>
+            </div>
+            <div class="my-1 border-t border-[#EAEAEA]"></div>
+            <button onclick="openSettingsModal(); toggleModelDropdown();" class="w-full px-3.5 py-1.5 text-left text-[#0066FF] hover:bg-[#F4F4F5] font-medium flex items-center space-x-1.5 text-xs">
+              <span>⚙️ 录入与配置硬件密钥 (Vault)</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 展开右侧控制中心按钮 (仅在右侧栏收起时在右上角呈现) -->
+        <button id="btn-open-right-drawer" onclick="toggleRightDrawer()" class="relative bg-white border border-[#EAEAEA] floating-btn-shadow rounded-full p-2 flex items-center justify-center hover:bg-[#F9F9FB] text-[#1D1D1F] transition shrink-0" title="展开智能体控制中心">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+            <rect x="4" y="4" width="16" height="16" rx="2"></rect>
+            <path d="M9 4v16M14 9h3M14 13h3"></path>
+          </svg>
+          <span id="btn-open-drawer-badge" class="hidden absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-red-500 rounded-full border border-white"></span>
+        </button>
+      </div>
+    </header>
+
+    <!-- 视图容器 A：主对话流 (默认显示，居中 max-w-[680px]) -->
+    <div id="view-chat" class="flex-1 overflow-y-auto no-scrollbar pt-16 pb-28 px-6">
+      <!-- 智能体垂直展示区（仅在右侧栏收起时在中间显示，和右侧栏完全一致的上下竖向结构） -->
+      <div id="center-agent-profile" class="flex flex-col items-center justify-center pt-2 pb-6 select-none cursor-pointer group" onclick="toggleRightDrawer()" title="点击展开右侧智能体控制中心">
+        <div class="relative w-[76px] h-[76px]">
+          <!-- 头像外圈动画光环 -->
+          <div id="center-agent-avatar" class="avatar-agent-wrap avatar-idle w-full h-full cursor-pointer transition hover:scale-105" onclick="event.stopPropagation(); openAvatarPickerModal()" title="点击更换智能体形象">
+            <div class="avatar-ring"></div>
+            <div class="w-full h-full rounded-full bg-[#F5F2EB] flex items-center justify-center overflow-hidden border border-[#EAEAEA] shadow-inner">
+              <img id="center-agent-avatar-img" class="w-full h-full object-cover select-none pointer-events-none" src="/avatar/panda/idle.gif" alt="Center Avatar">
+              <span id="center-agent-avatar-icon" class="text-4xl hidden">🦦</span>
+            </div>
+          </div>
+          <!-- 右下角小铅笔编辑图标 -->
+          <button onclick="event.stopPropagation(); openAvatarPickerModal()" class="absolute bottom-0 right-0 w-6 h-6 rounded-full bg-white border border-[#EAEAEA] shadow-sm flex items-center justify-center text-[11px] hover:bg-gray-50 transition" title="更换智能体形象动图">
+            ✎
+          </button>
+        </div>
+        <h2 class="mt-2.5 text-[18px] font-bold text-[#1D1D1F] tracking-tight group-hover:text-blue-600 transition" id="center-agent-name">AlterEgo</h2>
+        <div class="mt-0.5 flex items-center space-x-1.5">
+          <span class="w-3.5 h-3.5 rounded-full bg-[#10B981] text-white flex items-center justify-center text-[9px] font-bold" id="center-agent-status-indicator">⚡</span>
+          <span class="text-[13px] text-[#8E8E93] font-medium" id="center-agent-state-detail">已就绪</span>
+          <button id="center-btn-stop" onclick="event.stopPropagation(); stopCurrentTask()" class="hidden ml-1 px-2 py-0.5 rounded-full bg-[#FEE2E2] text-[#EF4444] text-[11px] font-medium hover:bg-red-200 transition">
+            停止
+          </button>
+        </div>
+      </div>
+
+      <div class="max-w-[680px] mx-auto space-y-3" id="messages">
+        <!-- 消息流将由 JS 动态渲染 -->
+      </div>
+    </div>
+
+    <!-- 视图容器 B：其他 Tab (点子/目标/资源库/文档/PDF) 切换展示区 -->
+    <div id="view-other" class="hidden flex-1 overflow-y-auto pt-20 pb-24 px-10">
+      <div class="max-w-[780px] mx-auto" id="view-other-content"></div>
+    </div>
+
+    <!-- 底部悬浮全圆角胶囊输入框 (距底 16px，全圆角 9999px，白底细边框，带弥散投影) -->
+    <div class="bottom-input-wrap absolute bottom-4 left-0 right-0 px-6 pointer-events-none z-20">
+      <div class="bottom-input-pill max-w-[680px] mx-auto pointer-events-auto bg-white border border-[#E5E5EA] rounded-full pill-shadow px-4 py-2.5 flex items-center space-x-3">
+        <!-- 上传附件按钮 -->
+        <button id="btn-attach" class="w-8 h-8 rounded-full flex items-center justify-center text-[#1D1D1F] hover:bg-[#F4F4F5] transition text-xl font-light shrink-0" title="上传文件附件">
+          +
+        </button>
+        <input type="file" id="file-input" hidden>
+
+        <!-- 自适应多行文本域 -->
+        <textarea id="input" rows="1" placeholder="消息（Shift+Enter 换行，Enter 发送）" class="flex-1 bg-transparent text-[14.5px] text-[#1D1D1F] placeholder-[#A1A1AA] focus:outline-none resize-none leading-relaxed py-1" style="max-height: 120px;"></textarea>
+
+        <!-- 纯黑圆形发送按钮 -->
+        <button id="btn-send" class="w-8 h-8 rounded-full bg-[#18181B] hover:bg-black text-white flex items-center justify-center transition shrink-0" title="发送">
+          <svg class="w-4 h-4 ml-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ==================== 3. 右侧智能体控制中心抽屉 (固定 360px) ==================== -->
+  <aside id="right-drawer" class="hidden w-[360px] h-full border-l border-[#EAEAEA] bg-white flex flex-col shrink-0 relative z-20">
+    <!-- 右上角关闭抽屉按钮 -->
+    <button onclick="toggleRightDrawer()" class="absolute top-3.5 right-4 w-8 h-8 rounded-full flex items-center justify-center text-[#8E8E93] hover:bg-[#F4F4F5] hover:text-[#1D1D1F] transition" title="收起抽屉">
+      ✕
+    </button>
+
+    <!-- 顶部头像与连接状态 (动态 GIF + 6 态动画光环) -->
+    <div class="pt-7 pb-4 flex flex-col items-center">
+      <div class="relative w-[76px] h-[76px]">
+        <!-- 头像外圈动画光环 -->
+        <div id="agent-avatar" class="avatar-agent-wrap avatar-idle w-full h-full cursor-pointer transition hover:scale-105" onclick="openAvatarPickerModal()" title="点击更换智能体形象">
+          <div class="avatar-ring"></div>
+          <div class="w-full h-full rounded-full bg-[#F5F2EB] flex items-center justify-center overflow-hidden border border-[#EAEAEA] shadow-inner">
+            <img id="agent-avatar-img" class="w-full h-full object-cover select-none pointer-events-none" src="/avatar/panda/idle.gif" alt="Agent Avatar">
+            <span class="text-4xl hidden" id="agent-avatar-icon">🦦</span>
+          </div>
+        </div>
+        <!-- 右下角小铅笔编辑图标 -->
+        <button onclick="openAvatarPickerModal()" class="absolute bottom-0 right-0 w-6 h-6 rounded-full bg-white border border-[#EAEAEA] shadow-sm flex items-center justify-center text-[11px] hover:bg-gray-50 transition" title="更换智能体形象动图">
+          ✎
+        </button>
+      </div>
+      <h2 class="mt-2.5 text-[18px] font-bold text-[#1D1D1F] tracking-tight" id="agent-name">AlterEgo</h2>
+      <div class="mt-0.5 flex items-center space-x-1.5">
+        <span class="w-3.5 h-3.5 rounded-full bg-[#10B981] text-white flex items-center justify-center text-[9px] font-bold" id="agent-status-indicator">⚡</span>
+        <span class="text-[13px] text-[#8E8E93] font-medium" id="agent-state-detail">已就绪</span>
+      </div>
+    </div>
+
+    <!-- 胶囊形 4 段式横向 Tab 控制器 (Segmented Control) -->
+    <div class="px-5 mb-3">
+      <div class="w-full h-[38px] bg-[#F4F4F5] rounded-full p-1 grid grid-cols-4 items-center">
+        <!-- Tab 1: 动态流 -->
+        <button onclick="switchRightTab('feed')" id="rtab-feed" class="h-full rounded-full bg-white shadow-sm flex items-center justify-center text-[#1D1D1F] transition" title="动态流">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>
+          </svg>
+        </button>
+        <!-- Tab 2: 审核记录 (盾牌) -->
+        <button onclick="switchRightTab('audit')" id="rtab-audit" class="relative h-full rounded-full flex items-center justify-center text-[#71717A] hover:text-[#1D1D1F] transition" title="审核记录">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4"/>
+          </svg>
+          <span id="approval-tab-badge" class="hidden absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full"></span>
+        </button>
+        <!-- Tab 3: 定时任务 (时钟) -->
+        <button onclick="switchRightTab('cron')" id="rtab-cron" class="h-full rounded-full flex items-center justify-center text-[#71717A] hover:text-[#1D1D1F] transition" title="预定任务">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path stroke-linecap="round" d="M12 7v5l3 3"/>
+          </svg>
+        </button>
+        <!-- Tab 4: 身份与记忆 (指纹) -->
+        <button onclick="switchRightTab('identity')" id="rtab-identity" class="h-full rounded-full flex items-center justify-center text-[#71717A] hover:text-[#1D1D1F] transition" title="身份与记忆">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+            <path stroke-linecap="round" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 008 4.07M3 15.364c.64-1.319 1-2.8 1-4.364 0-1.457.39-2.823 1.07-4"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- 右侧内容滚动区 -->
+    <div class="flex-1 overflow-y-auto no-scrollbar px-5 pb-8">
+
+      <!-- ===== 右侧 Tab 1 内容：动态流 (三行垂直排版：主标题/副标题/时间戳) ===== -->
+      <div id="rcontent-feed" class="space-y-4">
+        <div id="feed-items-container" class="space-y-4">
+          <!-- JS 动态渲染任务流 -->
+        </div>
+      </div>
+
+      <!-- ===== 右侧 Tab 2 内容：审核记录 (盾牌) ===== -->
+      <div id="rcontent-audit" class="hidden space-y-3">
+        <div class="flex justify-between items-center mb-1">
+          <h3 class="text-[15px] font-semibold text-[#1D1D1F]">审核记录</h3>
+          <span id="audit-badge-count" class="text-xs text-[#8E8E93]">0 项</span>
+        </div>
+        <div id="audit-items-container" class="space-y-3">
+          <!-- JS 动态渲染审批卡片 -->
+        </div>
+      </div>
+
+      <!-- ===== 右侧 Tab 3 内容：定时任务 (时钟) ===== -->
+      <div id="rcontent-cron" class="hidden space-y-4">
+        <div class="flex justify-between items-center mb-1">
+          <h3 class="text-[15px] font-semibold text-[#1D1D1F]">预定自动化任务</h3>
+          <span class="text-xs text-[#8E8E93]">定时巡检与提醒</span>
+        </div>
+        <div id="cron-items-container" class="space-y-2">
+          <div class="py-12 px-4 text-center">
+            <div class="w-10 h-10 rounded-full bg-[#F4F4F5] text-[#8E8E93] flex items-center justify-center mx-auto mb-2.5 text-base">⏰</div>
+            <div class="text-[13.5px] font-medium text-[#1D1D1F]">暂无定时任务</div>
+            <div class="text-[12px] text-[#8E8E93] mt-0.5">可通过对话让智能体创建定时自动化任务与提醒</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 右侧 Tab 4 内容：身份与记忆 (高饱和度海报双卡片) ===== -->
+      <div id="rcontent-identity" class="hidden space-y-4">
+        <div class="flex justify-between items-center mb-1">
+          <span class="text-[15px] font-semibold text-[#1D1D1F]">智能体身份</span>
+          <button onclick="openSoulModal()" class="text-[13px] text-[#0066FF] hover:underline">编辑</button>
+        </div>
+
+        <!-- SOUL 红色大卡片 (#E11D48) -->
+        <div onclick="openSoulModal()" class="h-[150px] rounded-2xl bg-[#E11D48] text-white p-5 flex flex-col justify-between cursor-pointer hover:opacity-95 transition shadow-sm">
+          <div>
+            <h4 class="text-2xl font-extrabold tracking-wide">SOUL</h4>
+            <p class="text-xs text-rose-100 mt-1">系统灵魂设定 · 请谨慎访问</p>
+          </div>
+          <div class="flex justify-between items-center text-xs text-rose-100">
+            <span id="soul-card-date">v1.2</span>
+            <span>♥</span>
+          </div>
+        </div>
+
+        <!-- 记忆 深蓝紫色大卡片 (#3730A3) -->
+        <div onclick="openMemoryModal()" class="h-[150px] rounded-2xl bg-[#3730A3] text-white p-5 flex flex-col justify-between cursor-pointer hover:opacity-95 transition shadow-sm">
+          <div>
+            <h4 class="text-2xl font-extrabold tracking-wide">记忆</h4>
+            <p class="text-xs text-indigo-200 mt-1">MEMORY.md · 核心持久化沉淀</p>
+          </div>
+          <div class="flex justify-between items-center text-xs text-indigo-200">
+            <span id="memory-card-date">持久化</span>
+            <span>✦</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </aside>
+
+  <!-- ==================== 4. 会话列表滑动抽屉 (Sessions Drawer) ==================== -->
+  <div id="sessions-drawer" class="hidden fixed inset-0 z-40 bg-black/20 backdrop-blur-[1px]">
+    <div class="w-[280px] h-full bg-white border-r border-[#EAEAEA] pill-shadow flex flex-col p-4 animate-in">
+      <div class="flex justify-between items-center pb-3 border-b border-[#EAEAEA]">
+        <span class="font-bold text-[15px] text-[#1D1D1F]">历史对话</span>
+        <button onclick="toggleSessionsDrawer()" class="text-[#8E8E93] hover:text-black">✕</button>
+      </div>
+
+      <button onclick="createNewSession()" class="my-3 w-full py-2 bg-[#18181B] hover:bg-black text-white rounded-xl text-[13.5px] font-medium flex items-center justify-center space-x-2 transition">
+        <span>+</span>
+        <span>新建对话</span>
+      </button>
+
+      <div id="session-list" class="flex-1 overflow-y-auto no-scrollbar space-y-1">
+        <!-- JS 动态渲染会话项 -->
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 5. 动态详情双栏复盘 Modal (Activity Modal) ==================== -->
+  <div id="activity-modal" class="hidden fixed inset-0 bg-black/30 backdrop-blur-[1px] flex items-center justify-center z-50">
+    <div class="w-[720px] bg-white rounded-2xl pill-shadow border border-[#EAEAEA] overflow-hidden">
+      <div class="px-6 py-4 border-b border-[#EAEAEA] flex justify-between items-center">
+        <div class="flex items-center space-x-2.5">
+          <span class="px-2.5 py-0.5 rounded-full bg-emerald-50 text-[#10B981] text-xs font-semibold">已完成</span>
+          <h3 id="modal-title" class="text-[16px] font-semibold text-[#1D1D1F]">切换平台继续推进</h3>
+        </div>
+        <button onclick="closeActivityModal()" class="text-[#8E8E93] hover:text-black text-lg">✕</button>
+      </div>
+      <div class="grid grid-cols-12 min-h-[340px]">
+        <!-- 左栏：步骤时间轴 -->
+        <div class="col-span-5 border-r border-[#EAEAEA] p-5 space-y-3 text-[13px]" id="modal-steps">
+          <div class="flex items-center space-x-2 text-[#1D1D1F]">
+            <span class="text-[#10B981]">✔</span><span>已开始任务执行</span>
+          </div>
+          <div class="flex items-center space-x-2 text-[#1D1D1F]">
+            <span class="text-[#10B981]">✔</span><span>验证目标页面在线状态</span>
+          </div>
+          <div class="flex items-center space-x-2 text-[#1D1D1F]">
+            <span class="text-[#10B981]">✔</span><span>检索最新动态并提取结果</span>
+          </div>
+          <div class="flex items-center space-x-2 text-[#1D1D1F]">
+            <span class="text-[#10B981]">✔</span><span>同步结果并沉淀核心记忆</span>
+          </div>
+        </div>
+        <!-- 右栏：复盘总结与产出文档 -->
+        <div class="col-span-7 p-5 flex flex-col justify-between">
+          <div class="space-y-2">
+            <h4 class="text-[13px] font-semibold text-[#8E8E93]">执行摘要</h4>
+            <p id="modal-desc" class="text-[14px] text-[#1D1D1F] leading-relaxed"></p>
+          </div>
+          <div class="pt-4 border-t border-[#EAEAEA] hidden" id="modal-artifact-wrap">
+            <span class="text-[12px] text-[#8E8E93] block mb-2">关联生成构件</span>
+            <div class="p-3 rounded-xl bg-[#F4F4F5] flex items-center justify-between text-[13px]">
+              <span class="font-medium" id="modal-artifact">📄 暂无</span>
+              <span class="text-xs text-[#8E8E93]" id="modal-artifact-type">产物</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 6. 全局搜索模态框 (Search Modal) ==================== -->
+  <div id="search-modal" class="hidden fixed inset-0 bg-black/25 flex items-start justify-center pt-24 z-50">
+    <div class="w-[540px] bg-white rounded-2xl pill-shadow border border-[#EAEAEA] overflow-hidden">
+      <div class="p-4 border-b border-[#EAEAEA] flex items-center space-x-3">
+        <span class="text-[#8E8E93]">🔍</span>
+        <input type="text" id="search-modal-input" placeholder="搜索对话、构件或历史任务..." class="flex-1 text-[14.5px] focus:outline-none" oninput="onSearchInput(this.value)">
+        <button onclick="toggleSearchModal()" class="text-xs text-[#8E8E93] hover:text-black">ESC</button>
+      </div>
+      <div class="p-3 space-y-1 text-[13.5px] max-h-[360px] overflow-y-auto no-scrollbar" id="search-results-list">
+        <div class="p-6 text-center text-xs text-[#8E8E93]">输入关键词搜索历史会话、执行任务或审核记录…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 7. 系统设置模态窗 (Settings Modal) ==================== -->
+  <div id="settings-modal" class="hidden fixed inset-0 bg-black/30 backdrop-blur-[1px] flex items-center justify-center z-50">
+    <div class="w-[680px] max-h-[85vh] bg-white rounded-2xl pill-shadow border border-[#EAEAEA] overflow-hidden flex flex-col">
+      <div class="px-6 py-4 border-b border-[#EAEAEA] flex justify-between items-center">
+        <div class="flex items-center space-x-2">
+          <span class="text-lg">⚙️</span>
+          <h3 class="text-[16px] font-semibold text-[#1D1D1F]">系统设置与模型管理</h3>
+        </div>
+        <button onclick="closeSettingsModal()" class="text-[#8E8E93] hover:text-black">✕</button>
+      </div>
+
+      <div class="p-6 overflow-y-auto space-y-6 text-[13.5px]">
+        <!-- 大模型与安全凭证配置（一体化关联面板） -->
+        <div class="p-4 rounded-xl border border-[#EAEAEA] space-y-3.5 bg-white">
+          <div class="flex items-center justify-between">
+            <div class="font-semibold text-[14.5px] flex items-center space-x-2">
+              <span>🤖 大模型配置与安全凭证</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-600 font-normal">支持热切换</span>
+            </div>
+            <div id="vault-status-badge" class="text-xs text-[#10B981] font-medium flex items-center space-x-1">
+              <span>🔐 Windows DPAPI 硬件加密</span>
+            </div>
+          </div>
+          <p class="text-xs text-[#8E8E93] leading-relaxed">
+            模型标识、API 基础地址与 API Key 联动绑定。保存时密钥由 Windows 内置 Crypt32.dll 硬件级加密落盘，永不泄露明文。
+          </p>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-[#4B5563] mb-1">模型标识 (Model ID)</label>
+              <input type="text" id="setting-model" list="preset-models-datalist" placeholder="例如: agnes-3.0-flash 或 qwen3.8-omni-flash" class="w-full px-3 py-1.5 bg-[#F9F9FB] focus:bg-white rounded-lg border border-[#EAEAEA] focus:border-[#18181B] text-xs transition focus:outline-none">
+              <datalist id="preset-models-datalist"></datalist>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-[#4B5563] mb-1">API 基础地址 (Base URL)</label>
+              <input type="text" id="setting-base-url" placeholder="例如: https://apihub.agnes-ai.com/v1" class="w-full px-3 py-1.5 bg-[#F9F9FB] focus:bg-white rounded-lg border border-[#EAEAEA] focus:border-[#18181B] text-xs transition focus:outline-none">
+            </div>
+          </div>
+
+          <div>
+            <div class="flex items-center justify-between mb-1">
+              <label class="block text-xs font-medium text-[#4B5563]">API Key 访问密钥</label>
+              <span id="setting-key-status" class="text-xs text-[#10B981] font-medium">✓ 已配置硬件加密凭证</span>
+            </div>
+            <div class="relative flex items-center">
+              <input type="password" id="setting-api-key" placeholder="录入或更新 API Key (sk-...)，留空则保持现有密钥" class="w-full px-3 py-1.5 pr-8 border border-[#EAEAEA] focus:border-[#18181B] rounded-lg text-xs focus:outline-none bg-[#F9F9FB] focus:bg-white transition">
+              <button type="button" id="btn-toggle-key-visibility" class="absolute right-2.5 text-[#8E8E93] hover:text-[#1D1D1F] text-xs focus:outline-none" title="切换显示明文/密文">
+                👁️
+              </button>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between pt-1">
+            <div class="flex items-center space-x-2">
+              <button id="btn-test-llm" class="px-3.5 py-1.5 rounded-lg bg-[#F4F4F5] hover:bg-[#EBEBEC] text-[#1D1D1F] font-medium text-xs transition">
+                连通性测试
+              </button>
+              <span id="llm-test-result" class="text-xs text-[#8E8E93]"></span>
+            </div>
+            <button id="btn-save-model-config" class="px-4 py-1.5 rounded-lg bg-[#18181B] hover:bg-black text-white text-xs font-medium transition shadow-sm">
+              保存并立即生效
+            </button>
+          </div>
+        </div>
+
+        <!-- 微信 ClawBot 免键鼠绑定 -->
+        <div class="p-4 rounded-xl border border-[#EAEAEA] space-y-3">
+          <div class="font-semibold text-[14.5px] flex items-center space-x-2">
+            <span>📱 微信 ClawBot (免键鼠远程指令与审批)</span>
+          </div>
+          <p class="text-xs text-[#8E8E93] leading-relaxed">
+            基于微信官方开放协议长连接，手机微信随时发任务，回复「同意」直接授权，完全无需触碰电脑键鼠。
+          </p>
+          <div class="flex items-center justify-between p-3 rounded-lg bg-[#F9F9FB] border border-[#EAEAEA]">
+            <div>
+              <div id="weixin-status-badge" class="font-medium text-xs text-[#1D1D1F]">○ 正在检查状态...</div>
+              <div class="text-[11.5px] text-[#8E8E93] mt-0.5">扫码完成即可随时随地与智能体双向同步</div>
+            </div>
+            <button id="btn-weixin-login" class="px-3.5 py-1.5 bg-[#10B981] hover:bg-emerald-600 text-white rounded-lg text-xs font-medium transition">
+              生成登录二维码
+            </button>
+          </div>
+          <div id="weixin-qr-box" class="flex justify-center p-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 8. SOUL 设定编辑 Modal ==================== -->
+  <div id="soul-modal" class="hidden fixed inset-0 bg-black/30 backdrop-blur-[1px] flex items-center justify-center z-50">
+    <div class="w-[600px] bg-white rounded-2xl pill-shadow border border-[#EAEAEA] overflow-hidden">
+      <div class="px-6 py-4 border-b border-[#EAEAEA] flex justify-between items-center bg-[#E11D48] text-white">
+        <h3 class="text-[16px] font-bold">SOUL · 系统核心灵魂与偏好</h3>
+        <button onclick="closeSoulModal()" class="text-rose-100 hover:text-white">✕</button>
+      </div>
+      <div class="p-6 space-y-4">
+        <p class="text-xs text-[#8E8E93]">
+          SOUL 定义了 AlterEgo 的人格、执行风格、以及多模态思考倾向。
+        </p>
+        <textarea id="soul-content-text" rows="10" class="w-full p-3.5 border border-[#EAEAEA] rounded-xl text-[13px] font-mono leading-relaxed focus:outline-none bg-[#F9F9FB]">角色名: AlterEgo
+人设定位: 极致高效、严谨闭环的个人 AI 智能体
+交互风格: 沉稳专业、彻底杜绝裸 JSON 倾倒、永远给出人话反馈与复盘
+执行准则:
+1. 涉及系统文件写、终端执行、浏览器上传等敏感操作必触发 L2/L3 审批
+2. 跨站点任务自动开启标签页保护，杜绝覆盖临时邮箱
+3. 动态流实时归档并生成构件复盘</textarea>
+        <div class="flex justify-end space-x-2">
+          <button onclick="closeSoulModal()" class="px-4 py-2 rounded-xl bg-[#F4F4F5] text-xs font-medium hover:bg-[#EBEBEC]">取消</button>
+          <button onclick="saveSoulConfig()" class="px-4 py-2 rounded-xl bg-[#E11D48] text-white text-xs font-medium hover:opacity-90">保存设定</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 9. MEMORY.md 核心记忆编辑 Modal ==================== -->
+  <div id="memory-modal" class="hidden fixed inset-0 bg-black/30 backdrop-blur-[1px] flex items-center justify-center z-50">
+    <div class="w-[640px] bg-white rounded-2xl pill-shadow border border-[#EAEAEA] overflow-hidden">
+      <div class="px-6 py-4 border-b border-[#EAEAEA] flex justify-between items-center bg-[#3730A3] text-white">
+        <h3 class="text-[16px] font-bold">MEMORY.md · 核心持久化记忆库</h3>
+        <button onclick="closeMemoryModal()" class="text-indigo-200 hover:text-white">✕</button>
+      </div>
+      <div class="p-6 space-y-4">
+        <p class="text-xs text-[#8E8E93]">
+          启动 Agent 时自动注入的精华记忆，智能体会根据日常对话自动沉淀，亦可手动编辑。
+        </p>
+        <textarea id="setting-memory" rows="12" class="w-full p-3.5 border border-[#EAEAEA] rounded-xl text-[13px] font-mono leading-relaxed focus:outline-none bg-[#F9F9FB]" placeholder="加载记忆中..."></textarea>
+        <div class="flex justify-end space-x-2">
+  <!-- ==================== 10. 智能体形象切换 Modal (Avatar Picker Modal) ==================== -->
+  <div id="avatar-modal" class="hidden fixed inset-0 bg-black/30 backdrop-blur-[1px] flex items-center justify-center z-50">
+    <div class="w-[720px] max-h-[85vh] bg-white rounded-2xl pill-shadow border border-[#EAEAEA] overflow-hidden flex flex-col">
+      <div class="px-6 py-4 border-b border-[#EAEAEA] flex justify-between items-center">
+        <div class="flex items-center space-x-2.5">
+          <span class="text-xl">🎨</span>
+          <div>
+            <h3 class="text-[16px] font-bold text-[#1D1D1F]">更换智能体形象套系</h3>
+            <p class="text-xs text-[#8E8E93]">不同状态（空闲、思考、执行、等待、完成）将自动呈现专属动态 GIF</p>
+          </div>
+        </div>
+        <button onclick="closeAvatarPickerModal()" class="text-[#8E8E93] hover:text-black text-lg">✕</button>
+      </div>
+
+      <div class="p-6 overflow-y-auto space-y-5">
+        <div class="grid grid-cols-2 gap-4">
+          <!-- 熊猫套系卡片 -->
+          <div onclick="selectAvatarTheme('panda')" id="theme-card-panda" class="p-4 rounded-2xl border-2 border-[#0066FF] bg-blue-50/20 cursor-pointer transition hover:shadow-md space-y-3">
+            <div class="flex items-center space-x-3">
+              <div class="w-14 h-14 rounded-full overflow-hidden border border-[#EAEAEA] bg-white shrink-0 shadow-sm">
+                <img src="/avatar/panda/idle.gif" class="w-full h-full object-cover">
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center space-x-1.5">
+                  <h4 class="font-bold text-[15px] text-[#1D1D1F]">🐼 熊猫 (Panda)</h4>
+                  <span id="badge-panda" class="text-[10px] px-1.5 py-0.2 rounded bg-blue-600 text-white font-medium">当前生效</span>
+                </div>
+                <p class="text-xs text-[#8E8E93] mt-0.5">国宝呆萌 · 专注高效 · 状态动效全齐</p>
+              </div>
+            </div>
+            <div class="grid grid-cols-4 gap-1.5 pt-1 text-center text-[10.5px]">
+              <div class="p-1 rounded-lg bg-white border border-[#EAEAEA]">
+                <div class="text-[#8E8E93]">就绪</div>
+                <div class="font-medium text-emerald-600">眨眼</div>
+              </div>
+              <div class="p-1 rounded-lg bg-white border border-[#EAEAEA]">
+                <div class="text-[#8E8E93]">思考</div>
+                <div class="font-medium text-blue-600">转圈</div>
+              </div>
+              <div class="p-1 rounded-lg bg-white border border-[#EAEAEA]">
+                <div class="text-[#8E8E93]">工作中</div>
+                <div class="font-medium text-amber-600">忙碌</div>
+              </div>
+              <div class="p-1 rounded-lg bg-white border border-[#EAEAEA]">
+                <div class="text-[#8E8E93]">完成</div>
+                <div class="font-medium text-purple-600">欢呼</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 龙套系卡片 -->
+          <div onclick="selectAvatarTheme('dragon')" id="theme-card-dragon" class="p-4 rounded-2xl border-2 border-[#EAEAEA] bg-white cursor-pointer transition hover:shadow-md space-y-3">
+            <div class="flex items-center space-x-3">
+              <div class="w-14 h-14 rounded-full overflow-hidden border border-[#EAEAEA] bg-white shrink-0 shadow-sm">
+                <img src="/avatar/dragon/idle.gif" class="w-full h-full object-cover">
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center space-x-1.5">
+                  <h4 class="font-bold text-[15px] text-[#1D1D1F]">🐲 龙 (Dragon)</h4>
+                  <span id="badge-dragon" class="hidden text-[10px] px-1.5 py-0.2 rounded bg-blue-600 text-white font-medium">当前生效</span>
+                </div>
+                <p class="text-xs text-[#8E8E93] mt-0.5">祥瑞灵动 · 气势磅礴 · 状态动效全齐</p>
+              </div>
+            </div>
+            <div class="grid grid-cols-4 gap-1.5 pt-1 text-center text-[10.5px]">
+              <div class="p-1 rounded-lg bg-white border border-[#EAEAEA]">
+                <div class="text-[#8E8E93]">就绪</div>
+                <div class="font-medium text-emerald-600">眨眼</div>
+              </div>
+              <div class="p-1 rounded-lg bg-white border border-[#EAEAEA]">
+                <div class="text-[#8E8E93]">思考</div>
+                <div class="font-medium text-blue-600">转圈</div>
+              </div>
+              <div class="p-1 rounded-lg bg-white border border-[#EAEAEA]">
+                <div class="text-[#8E8E93]">工作中</div>
+                <div class="font-medium text-amber-600">忙碌</div>
+              </div>
+              <div class="p-1 rounded-lg bg-white border border-[#EAEAEA]">
+                <div class="text-[#8E8E93]">完成</div>
+                <div class="font-medium text-purple-600">欢呼</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 经典水獭卡片 (收录备选) -->
+        <div onclick="selectAvatarTheme('otter')" id="theme-card-otter" class="p-3.5 rounded-2xl border border-[#EAEAEA] bg-[#F9F9FB] cursor-pointer hover:bg-gray-100 transition flex items-center justify-between">
+          <div class="flex items-center space-x-3">
+            <span class="text-2xl ml-1">🦦</span>
+            <div>
+              <div class="font-bold text-[13.5px] text-[#1D1D1F]">经典水獭 (Otter)</div>
+              <div class="text-[11.5px] text-[#8E8E93]">Muse 原生简约风格</div>
+            </div>
+          </div>
+          <span id="badge-otter" class="hidden text-xs text-blue-600 font-semibold mr-2">✓ 使用中</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 全局悬浮 Toast 容器 -->
+<div id="toast-wrap"></div>
+
+<script src="static/purify.min.js"></script>
+<script src="static/marked.min.js"></script>
+<script src="static/highlight.min.js"></script>
+<script src="static/app.js"></script>
+</body>
+</html>

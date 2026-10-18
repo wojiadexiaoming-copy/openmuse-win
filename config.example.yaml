@@ -1,0 +1,80 @@
+# AlterEgo M1 配置示例：复制为 config.yaml 后填写
+# 完整 schema 见 docs/spec.md §13（M1 只用下面这些键）
+
+llm:
+  provider: "openai_compatible"
+  base_url: "https://api.example.com/v1"   # 改成你的网关地址
+  model: "qwen3-max"
+  # supports_images: true  # 可选能力声明；确认模型支持图像后再启用
+  # API Key 优先走 Vault (vault://llm_api_key)，或环境变量 ALTEREGO_LLM_API_KEY
+  temperature: 0.7
+  max_tokens: 8192
+  fallback:
+    enabled: true
+    base_url: "https://fallback.example.com/v1"
+    model: "qwen2.5-coder"
+    supports_images: false  # 图片请求仅允许回退至显式 true 的视觉模型；文本回退不受影响
+    temperature: 0.7
+    max_tokens: 8192
+
+# 按角色的模型路由表（主 Agent / Planner / 子 Agent / 后台 Worker）
+models:
+  roles:
+    main:
+      provider: "openai_compatible"
+      base_url: "https://api.example.com/v1"
+      model: "qwen3-max"
+      temperature: 0.7
+      max_tokens: 8192
+      fallback:
+        enabled: true
+        base_url: "https://fallback.example.com/v1"
+        model: "qwen2.5-coder"
+        supports_images: false  # 缺省也是 false；不要向文本后备发送截图
+        temperature: 0.7
+        max_tokens: 8192
+    planner:
+      ref: "main"
+    subagent:
+      provider: "openai_compatible"
+      base_url: "https://api.example.com/v1"
+      model: "qwen2.5-coder"
+      temperature: 0.2
+      max_tokens: 8192
+    worker:
+      provider: "openai_compatible"
+      base_url: "https://api.example.com/v1"
+      model: "qwen2.5-7b-instruct"
+      temperature: 0.3
+      max_tokens: 2048
+  critical_subagent_role: "main"
+
+
+context:
+  max_context_tokens: 128000
+  compact_threshold: 0.8
+  keep_tail_messages: 20
+
+agent:
+  max_iters: 25          # §5.2 防无限循环
+  workspace: "."          # file_* 工具允许的根目录（防跑出界）
+  parallel_tools: false   # M4 §5.5 工具并行（默认关，串行更稳）
+  task_tracker: true      # §31.6 任务进度后端（无 UI 时只记录不展示）
+
+tools:
+  shell_exec:
+    enabled: true
+    timeout_sec: 30
+    # 白名单外的命令直接拒绝，见 tools/shell_exec.py
+  web_search:
+    enabled: false        # 配好 api_url + api_key 再开
+    api_url: ""
+    api_key_env: "ALTEREGO_SEARCH_API_KEY"
+  browser:
+    enabled: true         # 启用浏览器自动化（Playwright）
+    headless: false       # 是否无头模式（false 为有头/可见浏览器，便于扫码/过验证码）
+
+# Optional multi-provider role routing; keys are provider-specific Vault entries.
+llm_router:
+  enabled: false
+  providers_file: docs/model-api-guide/llm_providers.yaml
