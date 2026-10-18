@@ -6,6 +6,7 @@
 
 *自研极简 ReAct 编排层 · 浏览器 ref 活体句柄 & SoM 框选 · Windows 桌面 UIA Pattern 直调 · 人机协同分屏*
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23446166.svg)](https://doi.org/10.5281/zenodo.23446166)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg?logo=windows)](https://www.microsoft.com/windows)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python)](https://www.python.org)
@@ -23,6 +24,31 @@
 2. **桌面控制侵入性强**：无脑抢夺人类物理鼠标、光标乱晃、UAC 权限穿透失控、破坏性指令无防线。
 
 OpenMuse-Win 在架构底层构建了**「浏览器不可变 ref 句柄 + Set-of-Mark (SoM) 框选」**与**「Windows 桌面 UIA Pattern 四层交互阶梯」**，配合严格的 **L1~L3 三级安全审批与物理光标让出机制**，实现了真正安全、拟人、确定性闭环的人机协同自动化。
+
+---
+
+## 📑 学术论文与技术报告 (Paper & Citation)
+
+本项目实证研究与系统架构论文已正式在 **Zenodo** 公开发布：
+
+> **AlterEgo: Towards the Zero-Cost Personal Agent**  
+> *Shihaoming (Independent Researcher)*  
+> 🏷️ **DOI**: [10.5281/zenodo.23446166](https://doi.org/10.5281/zenodo.23446166)  
+> 🌐 **Zenodo 归档**: [https://zenodo.org/records/23446166](https://zenodo.org/records/23446166)  
+> 📄 **论文 PDF 直达**: [alterego-paper.pdf](https://zenodo.org/records/23446166/files/alterego-paper.pdf?download=1)
+
+如果您在学术研究、系统复现、工程开发或技术报告中参考了本项目的系统架构与设计理念，请引用本论文：
+
+```bibtex
+@article{shi2026alterego,
+  title={AlterEgo: Towards the Zero-Cost Personal Agent},
+  author={Shi, Haoming},
+  year={2026},
+  publisher={Zenodo},
+  doi={10.5281/zenodo.23446166},
+  url={https://doi.org/10.5281/zenodo.23446166}
+}
+```
 
 ---
 
