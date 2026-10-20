@@ -19,6 +19,7 @@ rem                                  Tsinghua/Aliyun mirror for CN networks)
 rem =====================================================================
 setlocal EnableExtensions
 cd /d "%~dp0"
+set "PYTHONUTF8=1"
 if errorlevel 1 (
     echo [env] ERROR: cannot enter the project directory.
     exit /b 1
