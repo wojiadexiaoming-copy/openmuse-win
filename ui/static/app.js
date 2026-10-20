@@ -122,11 +122,170 @@ document.addEventListener("DOMContentLoaded", async () => {
     // 3. 加载全量状态快照并连接 SSE
     await loadStateSnapshot();
     connectSSE();
+    checkFirstRunOnboarding();
   } catch (e) {
     console.warn("未能连接到本地服务:", e);
     toast("正在连接服务: " + e.message);
   }
 });
+
+/* ================= 0. 首次运行配置向导 (First-Run Onboarding) ================= */
+const ONBOARD_PRESETS = {
+  dashscope: {
+    model: "qwen3.8-omni-flash",
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    placeholder: "sk-...",
+  },
+  deepseek: {
+    model: "deepseek-chat",
+    base_url: "https://api.deepseek.com/v1",
+    placeholder: "sk-...",
+  },
+  openai: {
+    model: "gpt-4o-mini",
+    base_url: "https://api.openai.com/v1",
+    placeholder: "sk-...",
+  },
+  gemini: {
+    model: "gemini-2.5-flash",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    placeholder: "AIzaSy...",
+  },
+};
+
+function selectOnboardingPreset(provider) {
+  const preset = ONBOARD_PRESETS[provider];
+  if (!preset) return;
+
+  const mInput = document.getElementById("onboard-model");
+  const uInput = document.getElementById("onboard-base-url");
+  const kInput = document.getElementById("onboard-api-key");
+  if (mInput) mInput.value = preset.model;
+  if (uInput) uInput.value = preset.base_url;
+  if (kInput) kInput.placeholder = `粘贴您的 API Key (如 ${preset.placeholder})`;
+
+  const btns = document.querySelectorAll(".onboard-preset-btn");
+  btns.forEach(btn => {
+    btn.className = "onboard-preset-btn p-3 rounded-xl border border-[#EAEAEA] bg-[#F9F9FB] text-left transition hover:border-blue-500";
+  });
+  const activeBtn = document.getElementById(`preset-${provider}`);
+  if (activeBtn) {
+    activeBtn.className = "onboard-preset-btn p-3 rounded-xl border-2 border-blue-600 bg-blue-50/40 text-left transition hover:border-blue-500";
+  }
+}
+
+function openOnboardingModal() {
+  document.getElementById("onboarding-modal")?.classList.remove("hidden");
+}
+
+function closeOnboardingModal() {
+  document.getElementById("onboarding-modal")?.classList.add("hidden");
+}
+
+function toggleOnboardKeyVisibility() {
+  const input = document.getElementById("onboard-api-key");
+  if (!input) return;
+  input.type = input.type === "password" ? "text" : "password";
+}
+
+async function testOnboardingLlm() {
+  const model = document.getElementById("onboard-model")?.value?.trim() || "";
+  const base_url = document.getElementById("onboard-base-url")?.value?.trim() || "";
+  const api_key = document.getElementById("onboard-api-key")?.value?.trim() || "";
+  const resEl = document.getElementById("onboard-test-result");
+  const btn = document.getElementById("btn-onboard-test");
+
+  if (!api_key) {
+    if (resEl) {
+      resEl.className = "text-xs text-[#EF4444]";
+      resEl.textContent = "请先填入 API Key 再测试";
+    }
+    return;
+  }
+
+  if (resEl) {
+    resEl.className = "text-xs text-blue-600 font-medium";
+    resEl.textContent = "正在探测连通性...";
+  }
+  if (btn) btn.disabled = true;
+
+  try {
+    const res = await api("/api/settings/test_llm", {
+      method: "POST",
+      body: JSON.stringify({ model, base_url, api_key }),
+    });
+    if (resEl) {
+      if (res.status === "ok") {
+        resEl.className = "text-xs text-[#10B981] font-medium";
+        resEl.textContent = `✓ 连通正常！回复: "${res.reply}"`;
+      } else {
+        resEl.className = "text-xs text-[#EF4444]";
+        resEl.textContent = `✗ 探测失败: ${res.message || "未知错误"}`;
+      }
+    }
+  } catch (e) {
+    if (resEl) {
+      resEl.className = "text-xs text-[#EF4444]";
+      resEl.textContent = `✗ 探测失败: ${e.message}`;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function saveOnboardingConfig() {
+  const model = document.getElementById("onboard-model")?.value?.trim() || "";
+  const base_url = document.getElementById("onboard-base-url")?.value?.trim() || "";
+  const api_key = document.getElementById("onboard-api-key")?.value?.trim() || "";
+  const saveBtn = document.getElementById("btn-onboard-save");
+
+  if (!api_key) {
+    toast("⚠️ 请填入 API Key 才能完成配置");
+    document.getElementById("onboard-api-key")?.focus();
+    return;
+  }
+
+  if (saveBtn) saveBtn.disabled = true;
+
+  try {
+    const saveRes = await api("/api/settings/save_model_config", {
+      method: "POST",
+      body: JSON.stringify({
+        model_id: model,
+        base_url: base_url,
+        api_key: api_key,
+        target_role: "all",
+      }),
+    });
+
+    await api("/api/settings/vault_key", {
+      method: "POST",
+      body: JSON.stringify({ key: api_key, name: "llm_api_key" }),
+    });
+
+    closeOnboardingModal();
+    toast("✓ 初始模型已成功绑定并加密存入 Vault，欢迎使用！");
+
+    if (saveRes && saveRes.current) {
+      updateCurrentModelUI(saveRes.current);
+    }
+    await loadAvailableModels();
+    await loadStateSnapshot();
+  } catch (e) {
+    toast("保存配置失败: " + e.message);
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+async function checkFirstRunOnboarding() {
+  try {
+    const s = await api("/api/settings");
+    if (!s.has_llm_key && !s.has_key) {
+      openOnboardingModal();
+    }
+  } catch (e) {}
+}
 
 /* ================= 全局键盘快捷键 ================= */
 function initGlobalKeyboard() {
@@ -146,6 +305,9 @@ function initGlobalKeyboard() {
 }
 
 function closeAllModals() {
+  document.getElementById("onboarding-modal")?.classList.add("hidden");
+  document.getElementById("setting-role-dropdown")?.classList.add("hidden");
+  document.getElementById("setting-model-dropdown")?.classList.add("hidden");
   document.getElementById("search-modal")?.classList.add("hidden");
   document.getElementById("activity-modal")?.classList.add("hidden");
   document.getElementById("settings-modal")?.classList.add("hidden");
@@ -156,6 +318,15 @@ function closeAllModals() {
   document.getElementById("download-popover")?.classList.add("hidden");
   document.getElementById("model-switcher-dropdown")?.classList.add("hidden");
 }
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#btn-toggle-role-dropdown") && !e.target.closest("#setting-role-dropdown")) {
+    document.getElementById("setting-role-dropdown")?.classList.add("hidden");
+  }
+  if (!e.target.closest("#setting-model") && !e.target.closest("#setting-model-dropdown") && !e.target.closest("[onclick*='toggleModelSelectDropdown']")) {
+    document.getElementById("setting-model-dropdown")?.classList.add("hidden");
+  }
+});
 
 /* ================= 1. 左侧主视图切换 ================= */
 function switchMainView(view) {
@@ -250,7 +421,7 @@ function switchRightTab(tab) {
 
 /* ================= 3. 抽屉与弹出层控制 ================= */
 function requestWindowSplitRatio(ratio) {
-  const token = window.ALTEREGO_TOKEN || "";
+  const token = API_TOKEN || window.ALTEREGO_TOKEN || "";
   fetch('/api/window/split_ratio', {
     method: 'POST',
     headers: {
@@ -489,6 +660,31 @@ function closeSettingsModal() {
   document.getElementById('settings-modal')?.classList.add('hidden');
 }
 
+async function openDetachedSettingsWindow() {
+  closeSettingsModal();
+  toast("✓ 正在打开独立桌面大窗口...");
+  try {
+    const res = await api("/api/open_settings_window");
+    if (res && res.error) {
+      toast("⚠️ 打开子窗口异常: " + res.error);
+    }
+  } catch (err) {
+    console.error("打开独立原生设置窗口失败:", err);
+    toast("⚠️ 打开子窗口请求失败: " + err.message);
+  }
+}
+
+async function toggleWidescreen() {
+  try {
+    await api("/api/window/control", {
+      method: "POST",
+      body: JSON.stringify({ action: "maximize" })
+    });
+  } catch (e) {
+    console.error("切换窗口尺寸失败:", e);
+  }
+}
+
 function openSoulModal() {
   document.getElementById('soul-modal')?.classList.remove('hidden');
 }
@@ -553,19 +749,129 @@ function renderRoleMatrix(roles) {
   }).join("");
 }
 
-function selectTargetRoleForEdit(rKey) {
-  const select = document.getElementById("setting-target-role");
-  if (select) {
-    select.value = rKey;
+const ROLE_DISPLAY_NAMES = {
+  main: "👑 主脑 (Main Brain)",
+  worker: "⚡ 后台工作者 (Worker)",
+  subagent: "🤖 子任务 (Subagent)",
+  planner: "📋 规划器 (Planner)",
+  fallback: "🛡️ 容灾兜底 (Fallback)",
+  all: "🌐 全部角色统一绑定 (All)",
+};
+
+function toggleRoleDropdown(forceOpen) {
+  const dd = document.getElementById("setting-role-dropdown");
+  if (!dd) return;
+  const shouldOpen = typeof forceOpen === "boolean" ? forceOpen : dd.classList.contains("hidden");
+  if (shouldOpen) {
+    document.getElementById("setting-model-dropdown")?.classList.add("hidden");
+    dd.classList.remove("hidden");
+  } else {
+    dd.classList.add("hidden");
   }
-  const r = currentRolesInfo[rKey];
-  if (r) {
-    const modelInput = document.getElementById("setting-model");
-    const urlInput = document.getElementById("setting-base-url");
-    if (modelInput && r.model) modelInput.value = r.model;
-    if (urlInput && r.base_url) urlInput.value = r.base_url;
+}
+
+function selectRoleOption(rKey, labelText) {
+  const input = document.getElementById("setting-target-role");
+  const label = document.getElementById("setting-target-role-label");
+  if (input) input.value = rKey;
+  if (label) label.textContent = labelText || ROLE_DISPLAY_NAMES[rKey] || rKey;
+  toggleRoleDropdown(false);
+
+  if (currentRolesInfo && currentRolesInfo[rKey]) {
+    const r = currentRolesInfo[rKey];
+    const mInput = document.getElementById("setting-model");
+    const uInput = document.getElementById("setting-base-url");
+    if (mInput && r.model) mInput.value = r.model;
+    if (uInput && r.base_url) uInput.value = r.base_url;
   }
   renderRoleMatrix(currentRolesInfo);
+}
+
+function selectTargetRoleForEdit(rKey) {
+  selectRoleOption(rKey, ROLE_DISPLAY_NAMES[rKey]);
+}
+
+function toggleModelSelectDropdown(forceOpen) {
+  const dd = document.getElementById("setting-model-dropdown");
+  if (!dd) return;
+  const shouldOpen = typeof forceOpen === "boolean" ? forceOpen : dd.classList.contains("hidden");
+  if (shouldOpen) {
+    document.getElementById("setting-role-dropdown")?.classList.add("hidden");
+    const inputVal = document.getElementById("setting-model")?.value || "";
+    renderSettingModelDropdown(inputVal);
+    dd.classList.remove("hidden");
+  } else {
+    dd.classList.add("hidden");
+  }
+}
+
+function onSettingModelInput(val) {
+  toggleModelSelectDropdown(true);
+  renderSettingModelDropdown(val);
+}
+
+function renderSettingModelDropdown(filterText = "") {
+  const dd = document.getElementById("setting-model-dropdown");
+  if (!dd) return;
+  let models = availableModels || [];
+  const q = (filterText || "").trim().toLowerCase();
+  if (q) {
+    models = models.filter(m => 
+      (m.name || "").toLowerCase().includes(q) || 
+      (m.id || "").toLowerCase().includes(q) || 
+      (m.tag || "").toLowerCase().includes(q)
+    );
+  }
+  if (!models.length) {
+    dd.innerHTML = `<div class="p-3 text-center text-gray-400 text-xs">暂无匹配预设模型 (可直接输入自定义 ID)</div>`;
+    return;
+  }
+  const anchorId = (availableModels && availableModels[0] && availableModels[0].id) || "auto";
+  dd.innerHTML = models.map(m => {
+    const keyHint = m.has_key ? `<span class="text-[10px] text-emerald-600 font-medium">✓ 已配密钥</span>` : `<span class="text-[10px] text-gray-400">需填 Key</span>`;
+    const tagHint = m.tag ? `<span class="text-[9.5px] px-1 py-0.2 rounded bg-gray-100 text-gray-600 font-normal">${esc(m.tag)}</span>` : "";
+    const isDeletable = m.id !== anchorId;
+    return `
+      <div onclick="selectSettingModel('${esc(m.id)}', '${esc(m.base_url || '')}')" class="group px-3 py-2 hover:bg-blue-50 cursor-pointer flex items-center justify-between border-b border-gray-50 last:border-b-0 transition">
+        <div class="min-w-0 pr-2">
+          <div class="font-semibold text-[#1D1D1F] flex items-center space-x-1.5 truncate">
+            <span>${esc(m.name || m.id)}</span>
+            ${tagHint}
+          </div>
+          <div class="text-[10.5px] text-[#8E8E93] truncate font-mono">${esc(m.id)}</div>
+        </div>
+        <div class="shrink-0 flex items-center space-x-1.5 text-right">
+          ${keyHint}
+          ${isDeletable ? `
+            <button type="button" onclick="event.stopPropagation(); deleteCustomModel('${esc(m.id)}')" class="text-xs text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-0.5 rounded border border-red-200/60 font-medium transition shrink-0 ml-1.5" title="删除该模型（若正被渠道使用将自动回退至第一个可用模型）">
+              删除
+            </button>
+          ` : '<span class="text-[10.5px] text-gray-300 select-none px-1" title="核心容灾锚点不可删除">🔒</span>'}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function selectSettingModel(modelId, baseUrl) {
+  const mInput = document.getElementById("setting-model");
+  const uInput = document.getElementById("setting-base-url");
+  if (mInput) mInput.value = modelId;
+  if (uInput && baseUrl) uInput.value = baseUrl;
+  toggleModelSelectDropdown(false);
+
+  // 联动更新密钥状态
+  const keyStatus = document.getElementById("setting-key-status");
+  const m = (availableModels || []).find(x => x.id === modelId);
+  if (keyStatus && m) {
+    if (m.has_key) {
+      keyStatus.className = "text-xs text-[#10B981] font-medium";
+      keyStatus.textContent = "✓ 当前端点已配置硬件加密凭证 (留空保持现有密钥)";
+    } else {
+      keyStatus.className = "text-xs text-[#EF4444] font-medium";
+      keyStatus.textContent = "○ 尚未配置该模型密钥，请在下方填入 API Key";
+    }
+  }
 }
 
 async function loadAvailableModels() {
@@ -680,10 +986,11 @@ function renderModelDropdownList(currentId, query = "") {
       `;
     }
 
+    const anchorId = (availableModels && availableModels[0] && availableModels[0].id) || "auto";
     group.items.forEach(m => {
       const isCur = m.id === currentId;
       const tagText = m.tag || (m.is_custom ? "自定义" : "模型");
-      const isCustom = !!m.is_custom;
+      const isDeletable = m.id !== anchorId;
 
       html += `
         <div onclick="switchModel('${esc(m.id)}')" class="group px-3.5 py-2 hover:bg-[#F4F4F5] cursor-pointer flex justify-between items-center transition ${isCur ? 'bg-blue-50/60' : ''}">
@@ -692,17 +999,18 @@ function renderModelDropdownList(currentId, query = "") {
               <span class="font-semibold text-[#1D1D1F] truncate text-[13px]">${esc(m.name || m.id)}</span>
               <span class="text-[10px] px-1.5 py-0.2 rounded font-normal shrink-0 ${isCur ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600'}">${esc(tagText)}</span>
               ${m.supports_images ? '<span class="text-[9px] px-1 py-0.2 rounded bg-emerald-50 text-emerald-600 font-normal shrink-0">视觉</span>' : ''}
+              ${m.has_key ? '<span class="text-[9px] px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-600 font-medium shrink-0">✓ 已配密钥</span>' : '<span class="text-[9px] px-1.5 py-0.2 rounded bg-gray-100 text-gray-400 font-normal shrink-0">需配 Key</span>'}
             </div>
             <div class="text-[11px] text-[#8E8E93] mt-0.5 line-clamp-1 leading-snug">${esc(m.desc || m.id)}</div>
             ${m.base_url ? `<div class="text-[9.5px] text-[#A1A1AA] truncate mt-0.5">${esc(m.base_url)}</div>` : ''}
           </div>
           <div class="flex items-center space-x-1.5 shrink-0">
             ${isCur ? '<span class="text-blue-600 font-bold text-sm">✓</span>' : ''}
-            ${isCustom ? `
-              <button onclick="event.stopPropagation(); deleteCustomModel('${esc(m.id)}')" class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 p-1 rounded transition text-xs" title="删除该自定义模型">
-                ✕
+            ${isDeletable ? `
+              <button type="button" onclick="event.stopPropagation(); deleteCustomModel('${esc(m.id)}')" class="text-xs text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-0.5 rounded border border-red-200/60 font-medium transition shrink-0" title="删除该模型（若正被渠道使用将自动回退至第一个可用模型）">
+                删除
               </button>
-            ` : ''}
+            ` : '<span class="text-[10.5px] text-gray-300 select-none px-1" title="核心容灾锚点不可删除">🔒</span>'}
           </div>
         </div>
       `;
@@ -728,11 +1036,36 @@ async function submitCustomModel(optionalId = "") {
 }
 
 async function deleteCustomModel(modelId) {
-  if (!confirm(`确定删除自定义模型 "${modelId}" 吗？`)) return;
+  if (!confirm(`确定删除自定义模型 "${modelId}" 吗？\n如果任意渠道（主脑/工作者/子智能体/规划器/容灾兜底）正使用该模型，将自动回退至第一个可用模型。`)) return;
   try {
     const res = await api(`/api/models/${encodeURIComponent(modelId)}`, { method: "DELETE" });
     if (res.ok) {
-      toast(`已移除自定义模型: ${modelId}`);
+      if (res.reset_roles && res.reset_roles.length > 0) {
+        const roleLabels = {
+          main: "主脑",
+          worker: "工作者",
+          subagent: "子智能体",
+          planner: "规划器",
+          fallback: "容灾兜底"
+        };
+        const resetNames = res.reset_roles.map(r => roleLabels[r] || r).join("、");
+        toast(`已删除模型 "${modelId}"，受影响渠道 [${resetNames}] 已默认回退至 "${res.fallback_model}"`);
+      } else {
+        toast(`已移除自定义模型: ${modelId}`);
+      }
+      if (res.current) {
+        updateCurrentModelUI(res.current);
+      }
+      if (res.models && Array.isArray(res.models)) {
+        availableModels = res.models;
+        renderModelDropdownList(res.current || UI.store.status.current_model, currentModelSearchQuery);
+        populateSettingsModelDatalist(availableModels);
+        renderSettingModelDropdown();
+      }
+      if (res.roles) {
+        currentRolesInfo = res.roles;
+        renderRoleMatrix(res.roles);
+      }
       await loadAvailableModels();
     } else {
       toast("删除失败: " + (res.error || "未知错误"));
@@ -776,13 +1109,33 @@ async function switchModel(modelId, baseUrl = null) {
   }
 }
 
-// 点击下拉外部区域自动收起模型列表
+// 点击下拉外部区域自动收起模型列表与设置面板下拉
 document.addEventListener("click", (e) => {
+  // 1. 顶部模型切换下拉
   const dd = document.getElementById("model-switcher-dropdown");
   const pill = document.getElementById("model-switcher-pill");
   if (dd && !dd.classList.contains("hidden")) {
     if (!dd.contains(e.target) && !pill?.contains(e.target)) {
       dd.classList.add("hidden");
+    }
+  }
+
+  // 2. 设置面板中的角色下拉
+  const roleDd = document.getElementById("setting-role-dropdown");
+  const roleBtn = document.getElementById("btn-toggle-role-dropdown");
+  if (roleDd && !roleDd.classList.contains("hidden")) {
+    if (!roleDd.contains(e.target) && !roleBtn?.contains(e.target)) {
+      roleDd.classList.add("hidden");
+    }
+  }
+
+  // 3. 设置面板中的模型选择下拉
+  const modelDd = document.getElementById("setting-model-dropdown");
+  const modelInput = document.getElementById("setting-model");
+  const modelBtn = document.getElementById("btn-toggle-model-dropdown");
+  if (modelDd && !modelDd.classList.contains("hidden")) {
+    if (!modelDd.contains(e.target) && !modelInput?.contains(e.target) && !modelBtn?.contains(e.target)) {
+      modelDd.classList.add("hidden");
     }
   }
 });
@@ -1406,7 +1759,9 @@ function bindApprovalCard(wrap, card) {
 
 function startApprovalCountdown(card) {
   const id = card.approval_id;
-  const expires = Number(card.expires_at) || (Date.now() + 60000);
+  const timeoutSec = Number(card.timeout_sec) || 300;
+  const created = Number(card.created_at || card.requested_at) ? (Number(card.created_at || card.requested_at) * 1000) : Date.now();
+  const expires = Number(card.expires_at) || (created + timeoutSec * 1000);
 
   clearInterval(approvalTimers[id]);
   approvalTimers[id] = setInterval(() => {
@@ -1416,7 +1771,7 @@ function startApprovalCountdown(card) {
     if (remain <= 0) {
       clearInterval(approvalTimers[id]);
       els.forEach(el => el.textContent = "已超时自动拒绝");
-      resolveApprovalUI(id, false, "once");
+      resolveApprovalUI(id, false, "once", "timeout");
     } else {
       els.forEach(el => el.textContent = `${remain}s 后自动关闭`);
     }
@@ -1443,16 +1798,19 @@ function resolveApprovalFromDrawer(id, approved) {
   resolveApproval(id, approved, scope);
 }
 
-function resolveApprovalUI(id, approved, scope) {
+function resolveApprovalUI(id, approved, scope, reason = "") {
   clearInterval(approvalTimers[id]);
   const cards = document.querySelectorAll(`[id="card-${id}"], [id="drawer-card-${id}"]`);
   cards.forEach(card => {
     card.querySelectorAll("button, input").forEach(el => el.disabled = true);
     const actions = card.querySelector(`[id="actions-${id}"]`) || card.querySelector(`[id="drawer-actions-${id}"]`);
     if (actions) {
-      actions.innerHTML = approved
-        ? `<div class="inline-flex items-center gap-1.5 py-1.5 px-4 rounded-full bg-emerald-50 text-[#059669] text-[13px] font-medium"><svg class="w-4 h-4" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>已通过授权（${SCOPE_LABEL[scope] || scope}）</div>`
-        : `<div class="inline-flex items-center gap-1.5 py-1.5 px-4 rounded-full bg-red-50 text-[#DC2626] text-[13px] font-medium"><svg class="w-4 h-4" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>已拒绝该操作</div>`;
+      if (approved) {
+        actions.innerHTML = `<div class="inline-flex items-center gap-1.5 py-1.5 px-4 rounded-full bg-emerald-50 text-[#059669] text-[13px] font-medium"><svg class="w-4 h-4" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>已通过授权（${SCOPE_LABEL[scope] || scope}）</div>`;
+      } else {
+        const rejectMsg = (reason === "timeout") ? "已超时自动拒绝" : "已拒绝该操作";
+        actions.innerHTML = `<div class="inline-flex items-center gap-1.5 py-1.5 px-4 rounded-full bg-red-50 text-[#DC2626] text-[13px] font-medium"><svg class="w-4 h-4" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>${rejectMsg}</div>`;
+      }
     }
   });
   UI.store.approvals = UI.store.approvals.filter(a => a.approval_id !== id);
@@ -1626,8 +1984,19 @@ function bindComposer() {
 
       try {
         toast(`正在上传附件 "${file.name}"…`);
-        const res = await fetch(API + "/api/uploads", { method: "POST", body: formData });
+        const headers = {};
+        if (API_TOKEN) {
+          headers["Authorization"] = "Bearer " + API_TOKEN;
+          headers["X-AlterEgo-Token"] = API_TOKEN;
+        }
+        const res = await fetch(API + "/api/uploads", { method: "POST", headers, body: formData });
+        if (!res.ok) {
+          throw new Error(`上传失败 (${res.status})`);
+        }
         const data = await res.json();
+        if (!data || !data.filename) {
+          throw new Error(data?.error || "上传返回异常");
+        }
         input.value += (input.value ? "\n" : "") + `[附件: ${data.filename}](${data.url})`;
         input.dispatchEvent(new Event("input"));
         toast("附件上传成功");
@@ -2237,8 +2606,13 @@ function bindSettingsControls() {
           body: JSON.stringify(payload),
         });
         if (resEl) {
-          resEl.className = "text-xs text-[#10B981] font-medium";
-          resEl.textContent = `✓ 连通正常！回复: "${res.reply}"`;
+          if (res.status === "ok") {
+            resEl.className = "text-xs text-[#10B981] font-medium";
+            resEl.textContent = `✓ 连通正常！回复: "${res.reply}"`;
+          } else {
+            resEl.className = "text-xs text-[#EF4444]";
+            resEl.textContent = `✗ 探测失败: ${res.message || "未知错误"}`;
+          }
         }
       } catch (e) {
         if (resEl) {
@@ -2483,6 +2857,10 @@ async function loadSettingsView() {
     if (keyInput) keyInput.value = "";
     if (m) m.value = s.model || "";
     if (u) u.value = s.base_url || "";
+    const roleInput = document.getElementById("setting-target-role");
+    const roleLabel = document.getElementById("setting-target-role-label");
+    if (roleInput) roleInput.value = "main";
+    if (roleLabel) roleLabel.textContent = "👑 主脑 (Main Brain)";
 
     if (keyStatus) {
       if (s.has_key) {
@@ -2594,8 +2972,8 @@ function connectSSE() {
 
   es.addEventListener("approval_resolved", e => {
     try {
-      const { approval_id, approved, scope } = JSON.parse(e.data);
-      resolveApprovalUI(approval_id, approved, scope);
+      const { approval_id, approved, scope, reason } = JSON.parse(e.data);
+      resolveApprovalUI(approval_id, approved, scope, reason);
     } catch (err) {}
   });
 
@@ -2641,6 +3019,98 @@ function connectSSE() {
     try {
       const { task_id, status, summary } = JSON.parse(e.data);
       resolveTakeoverUI(task_id, status, summary);
+    } catch (err) {}
+  });
+
+  // 9. 规划状态更新 (P1-1 / T04)
+  es.addEventListener("plan_update", e => {
+    try {
+      const data = JSON.parse(e.data);
+      UI.store.plan = data.plan || data.steps || [];
+      if (typeof renderPlanTab === "function") renderPlanTab(UI.store.plan);
+    } catch (err) {}
+  });
+
+  // 10. 任务执行进度更新 (P1-1 / T04)
+  es.addEventListener("task_progress", e => {
+    try {
+      const data = JSON.parse(e.data);
+      const percent = data.percent || (data.step && data.max_steps ? Math.round(data.step / data.max_steps * 100) : 0);
+      const stateText = `任务进度: ${percent}% (步骤 ${data.step || 0}/${data.max_steps || '?'})`;
+      if (UI.store.agentState) {
+        UI.store.agentState.detail = stateText;
+        renderAgentState(UI.store.agentState);
+      }
+    } catch (err) {}
+  });
+
+  // 11. 子 Agent 执行状态更新 (P1-1 / T04)
+  es.addEventListener("subagent_update", e => {
+    try {
+      const qd = JSON.parse(e.data);
+      if (qd && qd.queue_waiting !== undefined) {
+        const badge = document.getElementById("subagent-queue-badge");
+        if (badge) {
+          badge.textContent = qd.queue_waiting > 0 ? `排队 ${qd.queue_waiting}` : "";
+          badge.classList.toggle("hidden", qd.queue_waiting === 0);
+        }
+        return;
+      }
+    } catch (_) {}
+    try {
+      const data = JSON.parse(e.data);
+      const item = {
+        id: data.task_id || `sub-${Date.now()}`,
+        tool: "subagent",
+        summary: `子 Agent [${data.status || 'running'}]: ${data.summary || data.brief || '执行中...'}`,
+        status: data.status === "done" ? "ok" : (data.status === "failed" ? "error" : "running"),
+        started_at: nowTime(),
+      };
+      const match = UI.store.activity.find(a => a.id === item.id);
+      if (match) {
+        match.status = item.status;
+        match.result_summary = item.summary;
+      } else {
+        UI.store.activity.unshift(item);
+        UI.store.activity = UI.store.activity.slice(0, 30);
+      }
+      renderFeedTab(UI.store.activity);
+    } catch (err) {}
+  });
+
+  // 12. 模型热切换状态更新 (P1-1 / T04)
+  es.addEventListener("model_switched", e => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.model) {
+        if (UI.store.status) UI.store.status.current_model = data.model;
+        if (UI.store.agentState) {
+          UI.store.agentState.model = data.model;
+          renderAgentState(UI.store.agentState);
+        }
+        toast(`模型已热切换为 [${data.model}]`);
+      }
+    } catch (err) {}
+  });
+
+  // 13. Token 消耗统计更新 (P1-1 / T04)
+  es.addEventListener("token_usage", e => {
+    try {
+      const data = JSON.parse(e.data);
+      if (UI.store.status) {
+        UI.store.status.token_usage = { ...UI.store.status.token_usage, ...data };
+      }
+    } catch (err) {}
+  });
+
+  // 14. 任务状态更新 (P1-1 / T04)
+  es.addEventListener("task_update", e => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.summary && UI.store.agentState) {
+        UI.store.agentState.detail = data.summary;
+        renderAgentState(UI.store.agentState);
+      }
     } catch (err) {}
   });
 

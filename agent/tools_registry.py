@@ -5,11 +5,16 @@ M4 才加：并行执行（§5.5）、结果缓存（§7.3）、资源锁（§5.
 """
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass, field
 
 from .models import Message, terminal_tool_control
 from .resource_lock import resource_ids_for
 from .risk import classify_tool_risk
+
+
+logger = logging.getLogger("alterego.tools_registry")
 
 
 @dataclass
@@ -28,6 +33,7 @@ class ToolDefinition:
 class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
+        self._aliases: dict[str, str] = {}
         self.approval = None  # ApprovalManager（M2）。main.py 里 set_approval 接入。
         self.on_ask = None    # on_ask(card)->(approved, scope)，UI/CLI 实现
         self.cache = None     # ToolResultCache（M4 §7.3）
@@ -60,11 +66,20 @@ class ToolRegistry:
             raise ValueError(f"工具重名: {tool.name}")
         self._tools[tool.name] = tool
 
+    def register_alias(self, alias_name: str, target_name: str):
+        """注册别名：不进入 LLM openai_schemas 避免冗余，但调用时透明重定向至目标工具 (B5-01/B5-02)。"""
+        self._aliases[alias_name] = target_name
+
     def get(self, name: str) -> ToolDefinition:
+        target = self._aliases.get(name, name)
         try:
-            return self._tools[name]
+            return self._tools[target]
         except KeyError:
             raise ValueError(f"未知工具: {name}") from None
+
+    def __contains__(self, name: str) -> bool:
+        target = self._aliases.get(name, name)
+        return target in self._tools
 
     def openai_schemas(self) -> list[dict]:
         """转成 LLM 的 tools 参数格式。"""
@@ -96,6 +111,55 @@ class ToolRegistry:
                        metadata={"tool_control": {"retryable": False, "requires_user": True,
                                                    "reason": "desktop_failsafe"}})
 
+    @staticmethod
+    def _validate_tool_args(tool: ToolDefinition, args: any) -> str | None:
+        """SEC-01: 参数输入校验与原型污染/魔术属性防御。"""
+        if not isinstance(args, dict):
+            return f"[参数校验失败] 工具参数必须为 JSON 对象 (dict)，实际收到 {type(args).__name__}"
+
+        stack = [args]
+        forbidden_keys = {"__class__", "__proto__", "__init__", "__globals__", "__subclasses__", "__builtins__", "constructor"}
+        while stack:
+            curr = stack.pop()
+            if isinstance(curr, dict):
+                for k, v in curr.items():
+                    if isinstance(k, str) and k in forbidden_keys:
+                        return f"[参数校验失败] 检测到非法参数键: {k}"
+                    if isinstance(v, (dict, list)):
+                        stack.append(v)
+            elif isinstance(curr, (list, tuple)):
+                for item in curr:
+                    if isinstance(item, (dict, list)):
+                        stack.append(item)
+
+        params = getattr(tool, "parameters", None)
+        if isinstance(params, dict):
+            required = params.get("required") or []
+            if isinstance(required, list):
+                missing = [r for r in required if r not in args]
+                if missing:
+                    return f"[参数校验失败] 缺少必填参数: {', '.join(missing)}"
+            props = params.get("properties") or {}
+            if isinstance(props, dict):
+                type_map = {
+                    "string": (str,),
+                    "integer": (int,),
+                    "number": (int, float),
+                    "boolean": (bool,),
+                    "array": (list, tuple),
+                    "object": (dict,),
+                }
+                for prop_name, prop_spec in props.items():
+                    if prop_name in args and isinstance(prop_spec, dict):
+                        expected_type = prop_spec.get("type")
+                        val = args[prop_name]
+                        if val is not None and expected_type in type_map:
+                            if expected_type in ("integer", "number") and isinstance(val, bool):
+                                return f"[参数校验失败] 参数 '{prop_name}' 类型错误: 期望 {expected_type}，实际为 bool"
+                            if not isinstance(val, type_map[expected_type]):
+                                return f"[参数校验失败] 参数 '{prop_name}' 类型错误: 期望 {expected_type}，实际为 {type(val).__name__}"
+        return None
+
     def execute(self, name: str, args: dict, _provenance: dict | None = None,
                 approval=None, task_id: str = "?") -> Message:
         """执行单个工具。M1 串行；异常转成 tool 消息，不抛到主循环。
@@ -113,6 +177,22 @@ class ToolRegistry:
         if not tool.enabled:
             return Message(role="tool", name=name,
                            content=f"[工具未启用] {name} 在配置中被关闭")
+
+        # SEC-01: 参数输入校验与原型污染防御
+        val_err = self._validate_tool_args(tool, args)
+        if val_err:
+            return Message(role="tool", name=name, content=val_err)
+
+        # 提取参数中可能携带的 _provenance 并从入参中移除，避免污染工具函数
+        if isinstance(args, dict) and "_provenance" in args:
+            arg_prov = args.pop("_provenance")
+            if _provenance is None:
+                _provenance = arg_prov
+            elif isinstance(arg_prov, dict) and isinstance(_provenance, dict):
+                _provenance = {
+                    "level": max(_provenance.get("level", 0), arg_prov.get("level", 0)),
+                    "source_ref": arg_prov.get("source_ref") or _provenance.get("source_ref", "args"),
+                }
         # Reject missing evidence before an action approval.
         if getattr(tool.func, "__module__", "") == "tools.desktop":
             from tools.desktop_runtime import current_state, EvidenceError, normalize_key
@@ -145,11 +225,23 @@ class ToolRegistry:
             # 无审批器时（纯测试），L2/L3 直接拒绝 —— Fail Closed
             return Message(role="tool", name=name,
                            content=f"[审批未通过] 无审批器，{name} 需要用户确认")
-        # M4 §7.3：缓存命中直接返回
-        if self.cache:
-            hit = self.cache.get(name, args)
+        # M4 §7.3：缓存命中直接返回 (以 ToolDefinition.cacheable 为准，或已在 cache.TTL 中的工具)
+        if self.cache and (getattr(tool, "cacheable", False) or name in getattr(self.cache, "TTL", {})):
+            hit = self.cache.get(name, args, prov_level=prov_level)
             if hit is not None:
                 return Message(role="tool", name=name, content=hit + "\n[缓存命中]")
+        # 浏览器租约仲裁（主 Agent / 子 Agent 互斥）
+        if name.startswith("browser_") and hasattr(self, "browser_worker") and self.browser_worker:
+            bw = self.browser_worker
+            if hasattr(bw, "check_lease"):
+                import threading
+                caller_id = getattr(threading.current_thread(), "_lease_caller_id", None)
+                if not bw.check_lease(caller_id):
+                    owner = bw.current_lease_owner() if hasattr(bw, "current_lease_owner") else "未知"
+                    return Message(
+                        role="tool", name=name,
+                        content=f"[租约冲突] 浏览器当前由 {owner} 独占占用，调用方无法执行 {name}"
+                    )
         # M4 §5.9：资源锁
         resources = resource_ids_for(name, args) if self.locks else []
         acquired = []
@@ -168,18 +260,24 @@ class ToolRegistry:
                 else:
                     message = Message(role="tool", name=name, content=str(result))
             except Exception as e:  # noqa: BLE001 —— 工具异常必须兜住，不能崩主循环
+                logger.error("工具执行异常 tool=%s args=%s", name, args, exc_info=True)
                 stop = self._desktop_safety_stop(name, e)
                 if stop is not None:
                     return stop
+                from vault.manager import Vault
                 return Message(role="tool", name=name,
-                               content=f"[工具执行失败] {name}: {type(e).__name__}: {e}")
-            # M4 §7.3：写操作后清读缓存，否则写入缓存
+                               content=Vault.scrub_text(f"[工具执行失败] {name}: {type(e).__name__}: {e}"))
+            from vault.manager import Vault
+            if message.content:
+                message.content = Vault.scrub_text(message.content)
+            # M4 §7.3：写操作后清读缓存，否则写入缓存 (ToolDefinition.cacheable 优先)
             if self.cache and terminal_tool_control(message) is None:
                 if name in ("file_write", "file_edit"):
                     self.cache.invalidate_tool("file_read")
-                elif not message.images:
+                elif (getattr(tool, "cacheable", False) or name in getattr(self.cache, "TTL", {})) and not message.images:
                     # 当前缓存只存文字；图片结果必须保留完整视觉证据。
-                    self.cache.put(name, args, message.content)
+                    ttl_sec = getattr(tool, "cache_ttl_sec", 0)
+                    self.cache.put(name, args, message.content, ttl_sec=ttl_sec, prov_level=prov_level)
             return message
         finally:
             if self.locks:

@@ -59,3 +59,33 @@ def test_shell_blocked(registry):
 def test_unknown_tool(registry):
     with pytest.raises(ValueError):
         registry.get("nope")
+
+
+def test_sec01_prototype_pollution_blocked(registry):
+    r = registry.execute("file_write", {"__class__": {"__init__": {}}, "path": "a.txt", "content": "123"})
+    assert "[参数校验失败]" in r.content
+    assert "__class__" in r.content
+
+
+def test_sec01_missing_required_param(registry):
+    r = registry.execute("file_write", {"path": "a.txt"})
+    assert "[参数校验失败]" in r.content
+    assert "content" in r.content
+
+
+def test_perf02_provenance_isolated_cache(registry, tmp_path):
+    from tools.cache import ToolResultCache
+    cache = ToolResultCache(str(tmp_path / "cache.db"))
+    registry.set_cache(cache)
+
+    # 1. 以 L1 溯源等级写入并缓存
+    r1 = registry.execute("file_read", {"path": "a.txt"}, _provenance={"level": 1})
+    assert "[缓存命中]" not in r1.content
+
+    # 2. 再次以 L1 请求 -> 应该命中缓存
+    r2 = registry.execute("file_read", {"path": "a.txt"}, _provenance={"level": 1})
+    assert "[缓存命中]" in r2.content
+
+    # 3. 以 L2 (不可信源) 请求相同参数 -> 必须不能命中 L1 缓存！
+    r3 = registry.execute("file_read", {"path": "a.txt"}, _provenance={"level": 2})
+    assert "[缓存命中]" not in r3.content

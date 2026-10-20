@@ -681,6 +681,10 @@ class BrowserWorker:
         import threading
         if threading.current_thread().name.startswith(f"pw_{self.profile}"):
             return fn(*args, **kwargs)
+        caller_id = getattr(threading.current_thread(), "_lease_caller_id", None)
+        if hasattr(self, "check_lease") and not self.check_lease(caller_id):
+            owner = self.current_lease_owner() or "未知"
+            raise RuntimeError(f"浏览器独占租约冲突：当前正由 {owner} 独占使用，调用方 {caller_id or 'main'} 无法执行操作")
         future = self._executor.submit(fn, *args, **kwargs)
         return future.result()
 
@@ -1636,6 +1640,51 @@ class BrowserWorker:
             pass
         return msg
 
+    def _check_url_security(self, url: str) -> str | None:
+        """SEC-05: 导航安全与 SSRF/元数据/调试端口/敏感文件拦截。"""
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+
+        # 1. 协议白名单 (空 scheme 在补齐前不直接拦截)
+        if scheme and scheme not in ("http", "https", "about", "file"):
+            return f"[导航拦截] 不受支持的协议: '{scheme}'，仅支持 http, https, file, about"
+
+        # 2. 本地文件 file:// 路径检查
+        if scheme == "file":
+            raw_path = unquote(parsed.path)
+            if raw_path.startswith("/") and len(raw_path) > 2 and raw_path[2] == ":":
+                raw_path = raw_path[1:]
+            path_str = raw_path.replace("\\", "/").lower()
+            sensitive_patterns = (
+                "system32", "etc/passwd", "etc/shadow", ".ssh", "id_rsa", ".env", "vault/llm_api_key.bin"
+            )
+            if any(pat in path_str for pat in sensitive_patterns):
+                return "[导航拦截] 禁止通过本地文件协议访问系统或密钥敏感路径"
+            return None
+
+        # 3. HTTP / HTTPS 检查
+        if scheme in ("http", "https"):
+            host = (parsed.hostname or "").lower()
+            port = parsed.port
+
+            # 阻止云元数据服务 (AWS, GCP, Azure 等)
+            if host in ("169.254.169.254", "metadata.google.internal", "instance-data") or host.startswith("169.254."):
+                return "[域名不在白名单] 目标包含云元数据敏感地址 (169.254.x.x)，禁止访问"
+
+            # 阻止 Chrome / Edge CDP 远程调试端口 9222
+            if port == 9222 or ":9222" in url:
+                return "[导航拦截] 禁止访问浏览器远程调试接口 (CDP 9222)"
+
+            # 如果显式配置了允许域名白名单 (tools.browser.allowed_domains)
+            allowed = getattr(self, "allowed_domains", None)
+            if allowed and isinstance(allowed, (list, tuple, set)) and len(allowed) > 0:
+                allowed_set = {d.lower().strip() for d in allowed if d.strip()}
+                if host not in allowed_set and not any(host.endswith("." + d) for d in allowed_set):
+                    return f"[域名不在白名单] 域名 '{host}' 未在允许访问列表内"
+
+        return None
+
     def _do_navigate(self, args: dict) -> str:
         if (blocked := self._do_guard()):
             return blocked
@@ -1646,6 +1695,9 @@ class BrowserWorker:
             self.smart_zoom.record_action("navigate", 0, 0, f"打开网址: {url}")
         if not url:
             return "[导航失败] URL 不能为空"
+
+        if (sec_err := self._check_url_security(url)):
+            return sec_err
 
         # 常见大模型幻觉与简写域名自动纠偏
         alias_map = {
@@ -1681,6 +1733,9 @@ class BrowserWorker:
                 url = p.as_uri()
             else:
                 url = f"https://{url}"
+
+        if (sec_err := self._check_url_security(url)):
+            return sec_err
 
         # §39.5 通用最基本打开网址逻辑：
         # 跨域打开新站点时，绝不覆盖当前已有页面（保护表单输入、临时邮箱会话等）
@@ -2488,6 +2543,56 @@ class BrowserWorker:
         except Exception:
             return False
 
+    @staticmethod
+    def _set_system_clipboard(text: str) -> bool:
+        """把文本写入「操作系统剪贴板」——OS 级输入通道（L5）的第一步。
+        优先级：tkinter（标准库，Windows 上写入即取得剪贴板所有权，销毁后仍保留）
+        → pyperclip → PowerShell Set-Clipboard。"""
+        try:
+            import tkinter
+            _r = tkinter.Tk()
+            _r.withdraw()
+            _r.clipboard_clear()
+            _r.clipboard_append(text)
+            _r.update()
+            _r.destroy()
+            return True
+        except Exception:
+            pass
+        try:
+            import pyperclip  # type: ignore
+            pyperclip.copy(text)
+            return True
+        except Exception:
+            pass
+        try:
+            import subprocess
+            subprocess.run(["powershell", "-NoProfile", "-Command", "$input | Set-Clipboard"],
+                           input=text.encode("utf-8"), timeout=8)
+            return True
+        except Exception:
+            return False
+
+    def _os_paste(self, text: str, clear_before: bool = True) -> bool:
+        """OS 级输入通道（L5）：系统剪贴板 + 真实 Ctrl+V 键事件。
+        合成 input 事件与 DOM 赋值都会被 state 门控编辑器（Draft.js/brt/ProseMirror/
+        受控组件）的 React state 忽略；而浏览器原生的 Ctrl+V 粘贴是 isTrusted 行为，
+        能真正驱动 state 更新（发布按钮点亮、占位符隐藏）。"""
+        import time as _t
+        page = self._raw_page
+        if not text or not self._set_system_clipboard(text):
+            return False
+        try:
+            if clear_before:
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                _t.sleep(0.05)
+            page.keyboard.press("Control+V")
+            _t.sleep(0.2)
+            return True
+        except Exception:
+            return False
+
     def _do_type_text(self, args: dict) -> str:
         if (blocked := self._do_guard()):
             return blocked
@@ -2870,6 +2975,17 @@ class BrowserWorker:
             except Exception:
                 pass
 
+        # L5 兜底升级：DOM 赋值 + 合成事件 + 真实逐键都拿不下时（典型：Draft.js/brt
+        # 这类 state 门控编辑器，DOM 有字但 React state 恒空），转 OS 级粘贴——
+        # 写系统剪贴板 + 真实 Ctrl+V（isTrusted，能驱动 state 更新）。
+        if text and text not in actual_val:
+            if self._os_paste(text, clear_before=True):
+                time.sleep(0.25)
+                try:
+                    actual_val = str(self._raw_page.evaluate(readback_js) or "")
+                except Exception:
+                    pass
+
         try:
             self._raw_page.evaluate("""() => {
                 if (document.activeElement) {
@@ -2908,6 +3024,170 @@ class BrowserWorker:
             result += self._verify_expect(expect)
 
         return result
+
+    def fill_combo(self, args: dict) -> str:
+        return self._run(self._do_fill_combo, args)
+
+    def _do_fill_combo(self, args: dict) -> str:
+        """联想下拉框（autocomplete combobox）输入 + 选中（L6 原语）。
+        解决携程出发地/12306/淘宝这类"输入框 + 联想候选列表"控件：
+        只往 DOM 写字，城市码/选项值从未提交，提交时仍用旧值（表现为"填不上/搜不到"）。
+        必须真实逐键输入触发联想请求，再点击候选列表项才算落地。
+        步骤：真实点击聚焦 → 清空 → 真实逐键输入 → 等候选列表 → 点选 → 回读核验。"""
+        if (blocked := self._do_guard()):
+            return blocked
+        import time as _t
+        text = str(args.get("text", "") or "")
+        option = str(args.get("option", "") or "").strip()
+        if not text:
+            return "[缺少 text] 需要输入到联想框的查询词（如城市名/拼音）"
+        ref = (args.get("ref") or "").strip()
+        selector = (args.get("selector") or "").strip()
+        frame_ref = args.get("frame", "auto")
+        try:
+            timeout = min(max(float(args.get("timeout", 3.0) or 3.0), 0.5), 10.0)
+        except (TypeError, ValueError):
+            timeout = 3.0
+        if ref:
+            probe = self._find_locator(f'[data-ae-ref="{ref}"]', frame_ref)
+            if probe[1] is None or probe[1].count() == 0:
+                return (f"[ref 失效] 句柄 {ref} 不在当前页面（可能已跳转或局部重渲染）。"
+                        f"请重新调用 browser_snapshot 获取最新 ref，禁止沿用旧 ref。")
+            selector = f'[data-ae-ref="{ref}"]'
+        if not selector:
+            return "[缺少 selector 或 ref] 请指定联想输入框（携程出发地等）"
+        frame, loc, fid = self._find_locator(selector, frame_ref, scope_to_modal=True)
+        if loc is None or loc.count() == 0:
+            return f"[未找到] {selector}（frame={frame_ref}）"
+        try:
+            loc.first.scroll_into_view_if_needed(timeout=1500)
+        except Exception:
+            pass
+        # 1. 真实点击聚焦（联想逻辑只认真实键鼠事件，合成 click 不一定唤醒下拉）
+        box = None
+        try:
+            box = loc.first.bounding_box()
+        except Exception:
+            box = None
+        clicked = False
+        if box:
+            try:
+                self._human_like_click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                clicked = True
+            except Exception:
+                clicked = False
+        if not clicked:
+            try:
+                loc.first.click(timeout=2000)
+                clicked = True
+            except Exception:
+                pass
+        if not clicked:
+            return f"[输入失败] 无法点击聚焦目标 {selector}"
+        _t.sleep(0.2)
+        # 2. 清空 + 真实逐键输入（CDP 键事件，才会触发联想请求）
+        try:
+            self._raw_page.keyboard.press("Control+A")
+            self._raw_page.keyboard.press("Backspace")
+            self._raw_page.keyboard.type(text, delay=90)
+        except Exception as e:
+            return f"[输入失败] 键入射入失败: {e}"
+        # 3. 等候选列表（命中查询词的优先，超时则用兜底候选）
+        cands, hits = [], []
+        deadline = _t.time() + timeout
+        while _t.time() < deadline:
+            try:
+                cands = self._combo_options(text, box)
+            except Exception:
+                cands = []
+            hits = [c for c in cands if c.get("hit")]
+            if hits:
+                break
+            _t.sleep(0.15)
+        if not cands:
+            return (f"[无候选] 输入 '{text}' 后 {timeout:.1f}s 内未捕获联想候选列表。"
+                    f"可能：该框不是联想控件、联想请求被网络/风控拦截、或候选不在可识别容器内。"
+                    f"请 browser_screenshot 确认下拉是否真的没出现。")
+        # 4. 选候选：精确 option 文本 > 含查询词 > 输入框下方最近者
+        pick = None
+        if option:
+            pick = next((c for c in cands if option in c["text"]), None)
+        if pick is None and hits:
+            pick = hits[0]
+        if pick is None:
+            pick = cands[0]
+        try:
+            self._human_like_click(pick["x"], pick["y"])
+        except Exception as e:
+            return f"[选中失败] 点击候选 '{pick['text']}' 出错: {e}"
+        _t.sleep(0.3)
+        # 5. 回读核验
+        try:
+            after = str(loc.first.input_value(timeout=1500) or "")
+        except Exception:
+            after = ""
+        self._human_delay()
+        frame_note = "" if fid in (None, "f0") else f" [frame={fid}]"
+        say = f"[联想选中] {selector}{frame_note} 输入 '{text}' → 选中 '{pick['text']}'" + \
+              ("(精确匹配)" if option and option in pick["text"] else
+               "(含查询词)" if pick.get("hit") else "(兜底候选，未见含查询词的项)")
+        if after and text.lower() not in after.lower():
+            say += f" | 提交值='{after[:40]}'（已替换为选中项，落地成功）"
+        elif after:
+            say += f" | 回读值='{after[:40]}'（仍是查询词，提交状态请 browser_screenshot 确认）"
+        else:
+            say += " | 回读为空（该控件可能把值渲染在别处，请 browser_screenshot 确认）"
+        expect = args.get("expect")
+        if isinstance(expect, dict) and expect:
+            say += self._verify_expect(expect)
+        return say
+
+    def _combo_options(self, query: str, box: dict | None) -> list[dict]:
+        """采集联想候选项（可见、文本短、含常见下拉容器特征），返回页面坐标与是否命中查询词。
+        命中项（文本含 query）优先；不命中但位于输入框正下方的也保留作拼音/外文兜底。"""
+        js = """([q, ix, iy, iw, ih]) => {
+            const ql = (q || '').toLowerCase();
+            const okr = (el) => {
+                if (['INPUT', 'TEXTAREA', 'BODY', 'HTML', 'SCRIPT', 'STYLE'].includes(el.tagName)) return null;
+                const r = el.getBoundingClientRect();
+                if (r.width < 3 || r.height < 3) return null;
+                const st = getComputedStyle(el);
+                if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity) < 0.05) return null;
+                return r;
+            };
+            const sel = '[role="option"],[role="listitem"],[role="menuitem"],li,' +
+                        '[class*="option"],[class*="Option"],[class*="item"],[class*="Item"],' +
+                        '[class*="suggest"],[class*="Suggest"],[class*="dropdown"],[class*="Dropdown"],' +
+                        '[class*="list"] [class*="txt"],[class*="city"]';
+            const out = [], seen = new Set();
+            for (const el of document.querySelectorAll(sel)) {
+                let txt = (el.innerText || el.textContent || '').trim();
+                if (!txt || txt.length > 60) continue;
+                txt = txt.replace(/\\s+/g, ' ');
+                const r = okr(el);
+                if (!r) continue;
+                const isHit = !!ql && txt.toLowerCase().includes(ql);
+                // 不命中时，仅保留"输入框正下方"的候选作兜底（避免误抓页面其它列表）
+                const below = r.top >= iy + ih - 4 && r.top <= iy + ih + 560 &&
+                               r.left < ix + iw + 40 && (r.left + r.width) > ix - 40;
+                if (!isHit && !below) continue;
+                const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                const k = Math.round(cx) + ',' + Math.round(cy);
+                if (seen.has(k)) continue;
+                seen.add(k);
+                out.push({text: txt, x: cx, y: cy, hit: isHit});
+            }
+            out.sort((a, b) => (b.hit - a.hit) || (a.y - b.y));
+            return out.slice(0, 30);
+        }"""
+        b = box or {}
+        try:
+            res = self._raw_page.evaluate(
+                js, [query, b.get("x", 0), b.get("y", 0),
+                     b.get("width", 0), b.get("height", 0)])
+        except Exception:
+            return []
+        return res if isinstance(res, list) else []
 
     def record_start(self, args: dict) -> str:
         return self._run(self._do_record_start, args)
@@ -3285,6 +3565,95 @@ class BrowserWorker:
             return f"[按键] {key}"
         except Exception as e:
             return f"[按键失败] {key}: {e}"
+
+    def paste(self, args: dict) -> str:
+        return self._run(self._do_paste, args)
+
+    def _do_paste(self, args: dict) -> str:
+        """OS 级粘贴（L5 原语）：写系统剪贴板 → 发真实 Ctrl+V。
+        用于 state 门控编辑器（Draft.js/brt/ProseMirror/React 受控组件）与普通输入框：
+        合成 input 事件与 DOM 赋值会被 state 忽略，只有 isTrusted 的真实粘贴事件
+        才能驱动 state 更新（发布按钮点亮/占位符消失）。"""
+        if (blocked := self._do_guard()):
+            return blocked
+        import time as _t
+        text = str(args.get("text", "") or "")
+        from_clip = bool(args.get("from_clipboard", False))
+        ref = (args.get("ref") or "").strip()
+        selector = (args.get("selector") or "").strip()
+        frame_ref = args.get("frame", "auto")
+        clear_before = bool(args.get("clear_before", True))
+        press_enter = bool(args.get("press_enter", False))
+        if ref:
+            probe = self._find_locator(f'[data-ae-ref="{ref}"]', frame_ref)
+            if probe[1] is None or probe[1].count() == 0:
+                return (f"[ref 失效] 句柄 {ref} 不在当前页面（可能已跳转或局部重渲染）。"
+                        f"请重新调用 browser_snapshot 获取最新 ref。")
+            selector = f'[data-ae-ref="{ref}"]'
+        # 1. 聚焦目标
+        fid = None
+        if selector:
+            frame, loc, fid = self._find_locator(selector, frame_ref, scope_to_modal=True)
+            if loc is None or loc.count() == 0:
+                return f"[未找到] {selector}（frame={frame_ref}）"
+            try:
+                loc.first.scroll_into_view_if_needed(timeout=1500)
+            except Exception:
+                pass
+            try:
+                loc.first.click(timeout=2000)
+            except Exception:
+                try:
+                    loc.first.evaluate("(el) => el.focus()")
+                except Exception:
+                    return f"[输入失败] 无法聚焦目标 {selector}"
+            _t.sleep(0.2)
+        # 2. 写剪贴板（除非显式要求沿用现有剪贴板内容）
+        if not from_clip:
+            if not text:
+                return "[缺少 text] 传 text，或设 from_clipboard=true 沿用系统剪贴板现有内容"
+            if not self._set_system_clipboard(text):
+                return "[剪贴板失败] 无法写入系统剪贴板（tkinter / pyperclip / PowerShell 均不可用）"
+        # 3. 真实 Ctrl+V（isTrusted 键事件）
+        try:
+            if clear_before:
+                self._raw_page.keyboard.press("Control+A")
+                self._raw_page.keyboard.press("Backspace")
+                _t.sleep(0.05)
+            self._raw_page.keyboard.press("Control+V")
+            _t.sleep(0.25)
+        except Exception as e:
+            return f"[粘贴失败] Ctrl+V 键事件失败: {e}"
+        readback_js = """() => {
+            const el = document.activeElement;
+            if (!el) return '';
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return el.value || '';
+            return el.innerText || el.textContent || '';
+        }"""
+        try:
+            after = str(self._raw_page.evaluate(readback_js) or "")
+        except Exception:
+            after = ""
+        if press_enter:
+            try:
+                self._raw_page.keyboard.press("Enter")
+                _t.sleep(0.3)
+            except Exception:
+                pass
+        self._human_delay()
+        frame_note = "" if fid in (None, "f0") else f" [frame={fid}]"
+        if from_clip:
+            verdict = f"已粘贴系统剪贴板现有内容 | 回读摘录='{after[:40]}'"
+        elif text and text in after:
+            verdict = f"回读核验通过（写入字数={len(text)}）"
+        else:
+            verdict = ("回读未含目标文本——若目标是富文本编辑器属正常（值渲染在别处），"
+                       "请 browser_screenshot 确认；若确未落地，检查目标是否被人机验证浮层阻挡或未真正聚焦")
+        res = f"[已粘贴] {selector or '当前焦点'}{frame_note} | {verdict}"
+        expect = args.get("expect")
+        if isinstance(expect, dict) and expect:
+            res += self._verify_expect(expect)
+        return res
 
     def handler(self, args: dict):
         return self._run(self._do_handler, args)
@@ -4504,6 +4873,48 @@ def make_browser_tools(worker: BrowserWorker) -> list[ToolDefinition]:
                                ["selector", "text"]),
             func=worker.type_text),
         ToolDefinition(
+            name="browser_fill_combo",
+            description=(
+                "【联想下拉框专用】autocomplete combobox 输入 + 选中（L6）。"
+                "用于携程出发地/12306/淘宝这类'输入框 + 联想候选列表'控件——"
+                "只往框里写字，城市码/选项值不会提交，提交时仍用旧值（表现为'填不上/搜不到'）。"
+                "本工具真实点击聚焦 → 逐键输入触发联想 → 等候选列表出现 → 点击候选落地。"
+                "option 可指定要选中的候选可见文本（如 '北京 (BJS)'），留空则自动选含查询词的第一项。"
+            ),
+            parameters=_schema({
+                "text": {"type": "string", "description": "输入到联想框的查询词（如城市名/拼音，如 '天津'）"},
+                "option": {"type": "string", "default": "",
+                           "description": "要选中的候选可见文本（如 '天津 (TSN)'）；留空=自动选含查询词的第一项"},
+                "ref": {"type": "string", "default": "", "description": "【首选】联想输入框句柄，来自 browser_snapshot 的 [ref=aeN]"},
+                "selector": {"type": "string", "default": "", "description": "联想输入框 CSS 选择器（未传 ref 时用）"},
+                "timeout": {"type": "number", "default": 3.0, "description": "等待候选列表出现的最长秒数（0.5~10）"},
+                "frame": {"type": "string", "default": "auto", "description": "目标所在 frame，默认 auto 全搜"},
+                "expect": {"type": "object", "default": {}, "description": "选中后的期望状态（5秒内核验）"}
+            }, ["text"]),
+            func=worker.fill_combo),
+        ToolDefinition(
+            name="browser_paste",
+            description=(
+                "【OS 级输入终极通道 L5】写系统剪贴板 → 发真实 Ctrl+V。"
+                "当 browser_fill_input / browser_type 对 state 门控编辑器"
+                "（Draft.js/brt/ProseMirror/React 受控组件）失效时用——DOM 有字但 React state "
+                "不接收，合成事件与 DOM 赋值都无效，只有 isTrusted 的真实粘贴事件能驱动 state "
+                "更新（发布按钮点亮/占位符消失）。可传 text 现写现贴，或设 from_clipboard=true "
+                "沿用系统剪贴板现有内容。"
+            ),
+            parameters=_schema({
+                "text": {"type": "string", "default": "", "description": "要粘贴的文本（from_clipboard=true 时可空）"},
+                "from_clipboard": {"type": "boolean", "default": False,
+                                   "description": "true=沿用系统剪贴板现有内容（不覆盖剪贴板），默认 false 用 text"},
+                "ref": {"type": "string", "default": "", "description": "【首选】目标元素句柄，来自 browser_snapshot 的 [ref=aeN]"},
+                "selector": {"type": "string", "default": "", "description": "目标元素 CSS 选择器（未传 ref 时用）"},
+                "clear_before": {"type": "boolean", "default": True, "description": "粘贴前是否清空已有内容（Ctrl+A + Backspace），默认 true"},
+                "press_enter": {"type": "boolean", "default": False, "description": "粘贴后是否回车提交，默认 false"},
+                "frame": {"type": "string", "default": "auto", "description": "目标所在 frame，默认 auto 全搜"},
+                "expect": {"type": "object", "default": {}, "description": "粘贴后的期望状态（5秒内核验）"}
+            }, []),
+            func=worker.paste),
+        ToolDefinition(
             name="browser_screenshot",
             description=("页面截图（JPEG 80，最长边 1568px）。默认保留 SoM 彩色编号框选层，"
                          "模型可直接对照图中数字标号调用 browser_click(ref=\"aeN\")；"
@@ -4677,16 +5088,16 @@ def make_browser_tools(worker: BrowserWorker) -> list[ToolDefinition]:
             func=worker.request_takeover),
         ToolDefinition(
             name="browser_lock_input",
-            description="（§15 防误触）锁定人类物理鼠标键盘输入，Agent 独占执行。页面显示蓝色边框+提示。任务开始/恢复时调用。",
+            description="（§15 防误触）启用 DOM 层防误触遮罩，拦截网页内容区的物理键鼠输入，同时放行顶部人工接管条。Agent 自动化执行时使用。",
             parameters=_schema({}, []),
-            func=lambda args: ("[输入已锁定] 人类物理键鼠已屏蔽，Agent 独占执行中。"
+            func=lambda args: ("[DOM 防误触已启用] 网页内容区已拦截物理键鼠输入，顶部保留人工接管交互条。"
                                if worker.lock_input_for_agent() else "[锁定失败] 无可用页面"),
         ),
         ToolDefinition(
             name="browser_unlock_input",
-            description="（§15 防误触）解锁人类输入，允许用户操作页面（扫码/验证码/接管）。接管时调用。",
+            description="（§15 防误触）解除 DOM 层防误触遮罩，允许用户直接交互操作网页。进入人工接管状态时调用。",
             parameters=_schema({}, []),
-            func=lambda args: ("[输入已解锁] 用户可操作页面。"
+            func=lambda args: ("[DOM 防误触已解除] 用户可自由交互操作页面。"
                                if worker.unlock_input_for_human() else "[解锁失败] 无可用页面"),
         ),
         ToolDefinition(
@@ -4705,5 +5116,17 @@ def make_browser_tools(worker: BrowserWorker) -> list[ToolDefinition]:
             parameters=_schema({}, []),
             func=worker.record_stop),
     ]
+
+    readonly_tools = {
+        "browser_snapshot", "browser_screenshot", "browser_console",
+        "browser_network_log", "browser_inspect", "browser_resource",
+        "browser_storage", "browser_observe", "browser_find_text",
+        "browser_probe_at", "browser_context_list", "browser_verify_code_countdown",
+    }
+    for t in tools:
+        t.parallel_safe = False
+        t.is_readonly = t.name in readonly_tools
+
+    return tools
 
 # [M3 完成] 接管模式（用户接管浏览器窗口，见 spec §15/§31.5）已完整实现。

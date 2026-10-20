@@ -7,6 +7,7 @@ M2 实现核心逻辑。UI 卡片渲染在 ui/（H5 原型已有样式）。
 from __future__ import annotations
 
 import hashlib
+import logging
 import json
 import threading
 import time
@@ -14,6 +15,9 @@ import uuid
 from dataclasses import dataclass, field
 
 from .risk import classify_tool_risk
+
+
+logger = logging.getLogger("alterego.approval")
 
 
 class ApprovalPendingInterrupt(Exception):
@@ -229,6 +233,10 @@ class ApprovalCard:
     def requested_at(self) -> float:
         return self.created_at
 
+    @property
+    def expires_at(self) -> float:
+        return (self.created_at + self.timeout_sec) * 1000
+
     def consume(self) -> bool:
         """尝试消费此卡：pending→consumed 成功返回 True，已消费返回 False。"""
         if self.status != "pending":
@@ -274,6 +282,31 @@ class ApprovalManager:
         ).hexdigest()[:16]
         return f"{tool}:{sig}"
 
+    @staticmethod
+    def _extract_target(tool: str, args: dict) -> str:
+        """从参数中提取目标程序或域名。"""
+        if not isinstance(args, dict):
+            return ""
+        app = args.get("app") or args.get("process") or args.get("target") or args.get("name")
+        if app and isinstance(app, str):
+            app_clean = app.strip()
+            if app_clean.startswith("app:"):
+                return app_clean
+            if not app_clean.startswith(("http://", "https://", "/", "\\")):
+                return f"app:{app_clean}"
+        url = args.get("url") or args.get("domain")
+        if url and isinstance(url, str):
+            url_clean = url.strip()
+            if url_clean.startswith("domain:"):
+                return url_clean
+            from urllib.parse import urlsplit
+            try:
+                domain = urlsplit(url_clean).netloc or url_clean
+                return f"domain:{domain}"
+            except Exception:
+                return f"domain:{url_clean}"
+        return ""
+
     # ---------- 主入口 ----------
 
     def check(self, tool: str, args: dict,
@@ -284,18 +317,54 @@ class ApprovalManager:
         为 None 时（无 UI/测试）L2/L3 直接拒绝（Fail Closed）。
         prov_level：指令来源等级（§27.5），L2 来源的 L2 操作强制升 L3。
         """
-        # Explicit denial remains authoritative. Routine L1 actions need no card,
-        # including installations with a persisted legacy "ask" policy.
-        policy = self.settings.get(tool) if self.settings is not None else "ask"
+        # 常驻策略与目标覆盖先行（B3-01）
+        target = self._extract_target(tool, args)
+        policy = None
+        is_explicit = False
+
+        if self.settings is not None:
+            # 1. 检查是否存在按目标程序/域名的显式覆盖（B3-01）
+            overrides = getattr(self.settings, "overrides", {})
+            if target and isinstance(overrides, dict):
+                candidates = [target]
+                if ":" in target:
+                    candidates.append(target.split(":", 1)[1])
+                else:
+                    candidates.extend([f"app:{target}", f"domain:{target}"])
+                for cand in candidates:
+                    if cand in overrides and tool in overrides[cand]:
+                        policy = overrides[cand][tool]
+                        is_explicit = True
+                        break
+
+            # 2. 检查能力级全局策略
+            if policy is None:
+                try:
+                    policy = self.settings.get(tool, target=target)
+                except TypeError:
+                    policy = self.settings.get(tool)
+                defaults = getattr(self.settings, "DEFAULTS", {})
+                custom_policy = getattr(self.settings, "policy", {})
+                if tool in custom_policy and custom_policy[tool] == "ask" and defaults.get(tool) != "ask":
+                    is_explicit = True
+
         if policy == "deny":
             self._record_denied(tool, args)
             return False
+
         risk = self.classify(tool, args)
-        if risk == "L1" or (policy == "allow" and risk != "L3"):
-            return True
         if prov_level == 2 and risk == "L2":
             risk = "L3"  # §27.5：低信任域来源的敏感操作升级
-        if risk == "L1":
+
+        # 策略优先级与短路逻辑：
+        # - 显式配置的 ask（目标覆盖或非默认设定）：绝不被 L1 短路，强制弹卡询问
+        # - 显式 allow：若非 L3 则放行
+        # - 其它情况（包含旧版本全局默认 ask 或纯测试）：常规 L1 无需弹卡
+        if is_explicit and policy == "ask":
+            pass
+        elif policy == "allow" and risk != "L3":
+            return True
+        elif risk == "L1":
             return True
         wkey = self._wkey(tool, args)
         with self._lock:
@@ -323,19 +392,28 @@ class ApprovalManager:
                 return False
 
         action_cn, summary_cn, detail_cn, intent_cn = humanize_approval(tool, args)
+        from vault.manager import Vault
+        raw_detail = json.dumps(args, ensure_ascii=False)[:500]
         card = ApprovalCard(
-            approval_id=f"ap-{uuid.uuid4().hex[:10]}",
-            action=tool, detail=json.dumps(args, ensure_ascii=False)[:500],
-            risk=risk, action_cn=action_cn, summary_cn=summary_cn,
-            detail_cn=detail_cn, intent_cn=intent_cn, timeout_sec=self.timeout_sec)
+            approval_id=f"ap-{uuid.uuid4().hex}",
+            action=tool, detail=Vault.scrub_text(raw_detail),
+            risk=risk, action_cn=action_cn,
+            summary_cn=Vault.scrub_text(summary_cn),
+            detail_cn=Vault.scrub_text(detail_cn),
+            intent_cn=Vault.scrub_text(intent_cn),
+            timeout_sec=self.timeout_sec)
         with self._lock:
+            if card.approval_id in self._pending:
+                logger.error("审批 ID 冲突，拒绝覆盖: %s", card.approval_id)
+                return False
             self._pending[card.approval_id] = {
                 "card": card, "event": threading.Event(),
                 "decision": None, "scope": "once",
             }
         try:
             approved, scope = on_ask(card)
-        except Exception:  # noqa: BLE001 —— UI 异常按拒绝处理
+        except Exception as e:  # noqa: BLE001 —— UI 异常按拒绝处理
+            logger.error("审批等待异常 card=%s: %s", card.approval_id, e, exc_info=True)
             approved, scope = False, "once"
         with self._lock:
             p = self._pending.pop(card.approval_id, None)
@@ -357,16 +435,45 @@ class ApprovalManager:
         自然语言隐式审批（§36.10）：用户在聊天框直接说"发吧"/"行"/"按这个来"
         时，主循环将其路由为对挂起卡的批准，无需点击审批卡按钮。
         """
-        policy = self.settings.get(tool) if self.settings is not None else "ask"
+        target = self._extract_target(tool, args)
+        policy = None
+        is_explicit = False
+
+        if self.settings is not None:
+            overrides = getattr(self.settings, "overrides", {})
+            if target and isinstance(overrides, dict):
+                candidates = [target]
+                if ":" in target:
+                    candidates.append(target.split(":", 1)[1])
+                else:
+                    candidates.extend([f"app:{target}", f"domain:{target}"])
+                for cand in candidates:
+                    if cand in overrides and tool in overrides[cand]:
+                        policy = overrides[cand][tool]
+                        is_explicit = True
+                        break
+
+            if policy is None:
+                try:
+                    policy = self.settings.get(tool, target=target)
+                except TypeError:
+                    policy = self.settings.get(tool)
+                defaults = getattr(self.settings, "DEFAULTS", {})
+                custom_policy = getattr(self.settings, "policy", {})
+                if tool in custom_policy and custom_policy[tool] == "ask" and defaults.get(tool) != "ask":
+                    is_explicit = True
+
         if policy == "deny":
             self._record_denied(tool, args)
             return False
         risk = self.classify(tool, args)
-        if risk == "L1" or (policy == "allow" and risk != "L3"):
-            return True
         if prov_level == 2 and risk == "L2":
             risk = "L3"
-        if risk == "L1":
+        if is_explicit and policy == "ask":
+            pass
+        elif policy == "allow" and risk != "L3":
+            return True
+        elif risk == "L1":
             return True
 
         # 需要审批：创建卡片并抛出中断，不阻塞
@@ -376,12 +483,20 @@ class ApprovalManager:
                 return True
 
         action_cn, summary_cn, detail_cn, intent_cn = humanize_approval(tool, args)
+        from vault.manager import Vault
+        raw_detail = json.dumps(args, ensure_ascii=False)[:500]
         card = ApprovalCard(
-            approval_id=f"ap-{uuid.uuid4().hex[:10]}",
-            action=tool, detail=json.dumps(args, ensure_ascii=False)[:500],
-            risk=risk, action_cn=action_cn, summary_cn=summary_cn,
-            detail_cn=detail_cn, intent_cn=intent_cn, timeout_sec=self.timeout_sec)
+            approval_id=f"ap-{uuid.uuid4().hex}",
+            action=tool, detail=Vault.scrub_text(raw_detail),
+            risk=risk, action_cn=action_cn,
+            summary_cn=Vault.scrub_text(summary_cn),
+            detail_cn=Vault.scrub_text(detail_cn),
+            intent_cn=Vault.scrub_text(intent_cn),
+            timeout_sec=self.timeout_sec)
         with self._lock:
+            if card.approval_id in self._pending:
+                logger.error("审批 ID 冲突，拒绝覆盖: %s", card.approval_id)
+                return False
             self._pending[card.approval_id] = {
                 "card": card, "event": threading.Event(),
                 "decision": None, "scope": "once",

@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
+import logging
+import secrets
 import json
 import os
 import platform
@@ -22,6 +25,8 @@ import time
 import threading
 from functools import wraps
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 if sys.platform == "win32":
     import ctypes
@@ -45,6 +50,8 @@ def _dpapi_decryptable(blob: bytes) -> bool:
     """本机能否解开这段 DPAPI 密文（用来判断老 vault/ 属不属于本机）。"""
     if sys.platform != "win32" or not blob:
         return False
+    if blob.startswith(b"AEV1") and len(blob) >= 36:
+        blob = blob[36:]
     in_blob = _DATA_BLOB(
         len(blob),
         ctypes.cast(ctypes.create_string_buffer(blob), ctypes.POINTER(ctypes.c_byte)),
@@ -58,31 +65,49 @@ def _dpapi_decryptable(blob: bytes) -> bool:
     return True
 
 
-def _migrate_legacy_vault(legacy: Path, scoped: Path) -> None:
-    """老式共享 vault/ → 机器专属目录的迁移。
+def _migrate_legacy_vault(legacy: Path, scoped: Path, move: bool = False) -> None:
+    """旧目录 / 上级机器目录 → 机器专属目录的合并同步。
 
-    只有「其中所有 .bin 都能在本机解密」才搬（说明是本机写的老目录）；
-    否则说明老目录属于另一台机器，原样保留，不碰。
+    逐一探测每个 .bin 文件，若本机 DPAPI 可解密且目标目录缺失，则同步拷贝/搬迁过去。
     """
     if not legacy.is_dir():
         return
     bins = sorted(legacy.glob("*.bin"))
     if not bins:
         return
-    if not all(_dpapi_decryptable(p.read_bytes()) for p in bins):
-        return
     scoped.mkdir(parents=True, exist_ok=True)
+    import shutil
     for src in bins:
+        target = scoped / src.name
+        if target.exists():
+            continue
         try:
-            src.replace(scoped / src.name)
-        except OSError:
+            raw = src.read_bytes()
+            if _dpapi_decryptable(raw):
+                if move:
+                    src.replace(target)
+                else:
+                    shutil.copy2(src, target)
+        except Exception:
+            pass
+    integrity = legacy / ".integrity_key"
+    if integrity.is_file() and not (scoped / ".integrity_key").exists():
+        try:
+            if move:
+                integrity.replace(scoped / ".integrity_key")
+            else:
+                shutil.copy2(integrity, scoped / ".integrity_key")
+        except Exception:
             pass
     audit = legacy / "audit.db"
-    if audit.is_file():
+    if audit.is_file() and not (scoped / "audit.db").exists():
         try:
-            audit.replace(scoped / "audit.db")
-        except OSError:
-            pass  # 被旧连接占用时留原地，无伤大雅
+            if move:
+                audit.replace(scoped / "audit.db")
+            else:
+                shutil.copy2(audit, scoped / "audit.db")
+        except Exception:
+            pass
 
 
 def _vault_locked(method):
@@ -111,6 +136,9 @@ class Vault:
         "bailian_api_key",    # 阿里云百炼 API 别名
         "deepseek_api_key",   # DeepSeek 官方 API 别名
         "openai_api_key",     # OpenAI 兼容 API 别名
+        "echobird_api_key",   # 本地代理 (EchoBird / Codex-LB / 127.0.0.1:53683) 专属密钥
+        "anthropic_api_key",  # Anthropic 官方 API 别名
+        "claude_api_key",     # Claude API 别名
     }
 
     def __init__(self, data_dir: str | Path):
@@ -143,43 +171,146 @@ class Vault:
         base = Path(data_dir)
         if sys.platform != "win32":
             return cls(base / "vault")
-        scoped = base / f"vault-{_machine_tag()}"
-        if not scoped.exists():
-            _migrate_legacy_vault(base / "vault", scoped)
+        tag = _machine_tag()
+        scoped = base / f"vault-{tag}"
+        scoped.mkdir(parents=True, exist_ok=True)
+        # 扫描并同步本机可能存在的各旧目录 / 上级共享目录中的密钥
+        # 1. 对 base / "vault" 执行标准搬迁 (move=True)
+        if (base / "vault").is_dir() and (base / "vault").resolve() != scoped.resolve():
+            _migrate_legacy_vault(base / "vault", scoped, move=True)
+        # 2. 对其他机器/上级共享目录执行安全复制同步 (move=False)
+        for c in [base.parent / f"vault-{tag}", base.parent / "vault"]:
+            try:
+                if c.is_dir() and c.resolve() != scoped.resolve():
+                    _migrate_legacy_vault(c, scoped, move=False)
+            except Exception:
+                pass
         return cls(scoped)
 
+    def _try_import_key_from_candidates(self, key: str) -> bool:
+        """尝试从上级/同级机器目录中动态补全缺失的密钥。"""
+        tag = _machine_tag()
+        candidates = [
+            self.dir.parent / "vault",
+            self.dir.parent.parent / f"vault-{tag}",
+            self.dir.parent.parent / "vault",
+        ]
+        import shutil
+        for c in candidates:
+            try:
+                src = c / f"{key}.bin"
+                if src.is_file():
+                    raw = src.read_bytes()
+                    if _dpapi_decryptable(raw):
+                        cand_integrity = c / ".integrity_key"
+                        if cand_integrity.is_file() and not (self.dir / ".integrity_key").exists():
+                            try:
+                                shutil.copy2(cand_integrity, self.dir / ".integrity_key")
+                            except Exception:
+                                pass
+                        target = self.dir / f"{key}.bin"
+                        shutil.copy2(src, target)
+                        return True
+            except Exception:
+                pass
+        return False
+
     # ---------- 存取 ----------
+
+
+    def _get_integrity_key(self) -> bytes:
+        """获取或生成用于 Vault HMAC-SHA256 完整性签名的对称密钥。"""
+        if getattr(self, "_integrity_key", None):
+            return self._integrity_key
+        if not self._is_windows:
+            pw = os.environ.get("ALTEREGO_VAULT_PW", "dev-only").encode("utf-8")
+            self._integrity_key = hashlib.sha256(pw + b":integrity-salt").digest()
+            return self._integrity_key
+
+        key_file = self.dir / ".integrity_key"
+        if key_file.exists():
+            try:
+                raw = key_file.read_bytes()
+                decrypted = self._dpapi_unprotect(raw)
+                if len(decrypted) == 32:
+                    self._integrity_key = decrypted
+                    return self._integrity_key
+            except Exception as exc:
+                logger.warning("[Vault] 读取现有 integrity key 异常: %s", exc)
+
+        new_key = secrets.token_bytes(32)
+        try:
+            encrypted = self._dpapi_protect(new_key)
+            key_file.write_bytes(encrypted)
+        except Exception as exc:
+            logger.warning("[Vault] 持久化 integrity key 异常: %s", exc)
+        self._integrity_key = new_key
+        return self._integrity_key
+
+    def _sign_blob(self, ciphertext: bytes) -> bytes:
+        """为密文数据计算并附加 HMAC-SHA256 签名（前缀 b'AEV1' + 32字节摘要 + 密文）。"""
+        key = self._get_integrity_key()
+        mac = hmac.new(key, ciphertext, hashlib.sha256).digest()
+        return b"AEV1" + mac + ciphertext
+
+    def _verify_and_strip_blob(self, key_name: str, blob: bytes) -> bytes:
+        """校验密文 HMAC 完整性；若被篡改则报错，通过后剥离签名返回纯密文。"""
+        if blob.startswith(b"AEV1") and len(blob) >= 36:
+            mac = blob[4:36]
+            ciphertext = blob[36:]
+            key = self._get_integrity_key()
+            expected_mac = hmac.new(key, ciphertext, hashlib.sha256).digest()
+            if not hmac.compare_digest(mac, expected_mac):
+                logger.error("[Vault] 密钥 [%s] 完整性校验失败：文件内容已被篡改或损坏", key_name)
+                raise ValueError(f"Vault 完整性校验失败（数据被篡改或损坏）: {key_name}")
+            return ciphertext
+        # 兼容旧版本未带 AEV1 签名的裸密文
+        return blob
 
     @_vault_locked
     def set(self, key: str, secret: str):
         """用户填表/安全通道录入。直接写密文文件，不记明文日志。"""
         if key not in self.ALLOWLIST:
             raise ValueError(f"key 不在白名单，拒绝录入: {key}")
-        blob = self._protect(secret.encode("utf-8"))
-        (self.dir / f"{key}.bin").write_bytes(blob)
+        ciphertext = self._protect(secret.encode("utf-8"))
+        signed_blob = self._sign_blob(ciphertext)
+        (self.dir / f"{key}.bin").write_bytes(signed_blob)
         self._mem.pop(key, None)
 
     @_vault_locked
     def has(self, key: str) -> bool:
         """检查指定 key 是否已在 vault 中持久化存在。"""
-        return (self.dir / f"{key}.bin").exists() or key in self._mem
+        if (self.dir / f"{key}.bin").exists() or key in self._mem:
+            return True
+        return self._try_import_key_from_candidates(key)
 
     @_vault_locked
     def resolve(self, key: str, caller: str = "?") -> str:
         """取密钥。每次调用都审计；不在白名单直接拒绝。"""
+        import re
+        if not isinstance(key, str) or not re.match(r"^[a-zA-Z0-9_.-]+$", key):
+            raise ValueError(f"vault.resolve 拒绝：非法 key 格式: {key!r}")
+        safe_caller = caller if (isinstance(caller, str) and re.match(r"^[a-zA-Z0-9_.:?-]+$", caller)) else "unknown"
         ok = key in self.ALLOWLIST
         self._audit.execute(
             "INSERT INTO access_log VALUES (?,?,?,?)",
-            (time.time(), key, caller, int(ok)))
+            (time.time(), key, safe_caller, int(ok)))
         self._audit.commit()
         if not ok:
             raise PermissionError(f"vault.resolve 拒绝：{key} 不在白名单")
         if key not in self._mem:
             p = self.dir / f"{key}.bin"
             if not p.exists():
-                raise KeyError(f"vault 无此密钥（需用户录入）: {key}")
+                if not self._try_import_key_from_candidates(key):
+                    raise KeyError(f"vault 无此密钥（需用户录入）: {key}")
             try:
-                self._mem[key] = self._unprotect(p.read_bytes()).decode("utf-8")
+                raw_bytes = p.read_bytes()
+                ciphertext = self._verify_and_strip_blob(key, raw_bytes)
+                self._mem[key] = self._unprotect(ciphertext).decode("utf-8")
+            except ValueError as exc:
+                if "完整性校验失败" in str(exc):
+                    raise
+                raise KeyError(f"vault 密文解析失败: {key}") from exc
             except (OSError, UnicodeDecodeError) as exc:
                 # DPAPI 密文绑定「当前用户 + 当前机器」，跨机器/换用户后解不开。
                 # 当成“本机没有这个 key”处理，让调用方走环境变量/重新录入的兜底路径，
@@ -198,23 +329,36 @@ class Vault:
 
     # ---------- 消毒 ----------
 
+    @classmethod
+    def scrub_text(cls, text: str) -> str:
+        """无状态的文本通用脱敏，覆盖常见云服务与模型凭据特征（B3-07）。"""
+        if not text:
+            return text
+        # 常见键值对形：api_key=xxx, secret: xxx, token=xxx
+        text = re.sub(r"(?i)(api[_-]?key|secret|token|password|auth|authorization)\s*[:=]\s*['\"]?[\w\-\.]{12,}['\"]?",
+                      r"\1=[REDACTED]", text)
+        # 常见前缀凭证
+        text = re.sub(r"(?i)\bbearer\s+['\"]?[A-Za-z0-9_\-\.]{16,}['\"]?", "Bearer [REDACTED]", text)
+        text = re.sub(r"\bgithub_pat_[\w]+", "[REDACTED]", text)
+        text = re.sub(r"\bgh[pousr]_[\w]{20,}", "[REDACTED]", text)
+        text = re.sub(r"\bsk-[\w\-]{16,}", "[REDACTED]", text)
+        text = re.sub(r"\bnvapi-[\w\-]{16,}", "[REDACTED]", text)
+        text = re.sub(r"\bAIza[0-9A-Za-z\-_]{20,}", "[REDACTED]", text)
+        text = re.sub(r"\bcfat_[\w\-]{16,}", "[REDACTED]", text)
+        return text
+
     @_vault_locked
     def scrub(self, text: str) -> str:
         """所有进 LLM / 日志 / UI 的文本先过这里。
 
-        策略：已知的密钥明文（内存里的）直接替换；再用正则扫常见密钥形状。
+        策略：已知的密钥明文（内存里的）直接替换；再用通用正则扫常见密钥形状。
         """
         if not text:
             return text
         for secret in self._mem.values():
             if secret and len(secret) >= 8 and secret in text:
                 text = text.replace(secret, "[REDACTED]")
-        # 常见形状兜底
-        text = re.sub(r"(?i)(api[_-]?key\s*[:=]\s*)['\"]?[\w\-]{16,}['\"]?",
-                      r"\1[REDACTED]", text)
-        text = re.sub(r"github_pat_[\w]+", "[REDACTED]", text)
-        text = re.sub(r"sk-[\w\-]{16,}", "[REDACTED]", text)
-        return text
+        return self.scrub_text(text)
 
     # ---------- 平台相关 ----------
 

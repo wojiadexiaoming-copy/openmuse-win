@@ -22,25 +22,26 @@ class ToolResultCache:
             "(ckey TEXT PRIMARY KEY, tool TEXT, result TEXT, expires_at REAL)")
 
     @staticmethod
-    def _key(tool: str, args: dict) -> str:
-        raw = f"{tool}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+    def _key(tool: str, args: dict, prov_level: int = 0) -> str:
+        raw = f"{tool}:{prov_level}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
-    def get(self, tool: str, args: dict) -> str | None:
-        if tool not in self.TTL:
-            return None
+    def get(self, tool: str, args: dict, prov_level: int = 0) -> str | None:
         row = self.db.execute(
             "SELECT result FROM tool_cache WHERE ckey=? AND expires_at>?",
-            (self._key(tool, args), time.time())).fetchone()
+            (self._key(tool, args, prov_level=prov_level), time.time())).fetchone()
         return row[0] if row else None
 
-    def put(self, tool: str, args: dict, result: str):
-        if tool not in self.TTL:
+    def put(self, tool: str, args: dict, result: str, ttl_sec: int | None = None, ttl: int | None = None, prov_level: int = 0):
+        effective_ttl = ttl_sec if ttl_sec is not None else ttl
+        if effective_ttl is None or effective_ttl <= 0:
+            effective_ttl = self.TTL.get(tool, 0)
+        if effective_ttl <= 0:
             return
         self.db.execute(
             "INSERT OR REPLACE INTO tool_cache VALUES (?,?,?,?)",
-            (self._key(tool, args), tool, result,
-             time.time() + self.TTL[tool]))
+            (self._key(tool, args, prov_level=prov_level), tool, result,
+             time.time() + effective_ttl))
         self.db.commit()
 
     def invalidate_tool(self, tool: str):
