@@ -133,14 +133,12 @@ class SessionStore:
                     c_ts, mid, imgs_json, meta_json
                 ))
 
+            new_rows = []
             for seq, values in enumerate(serialized):
                 prev = existing_summary.get(seq)
                 m = history[seq]
                 if prev is None:
-                    self.db.execute(
-                        "INSERT INTO messages (session_id, seq, role, content, tool_calls,"
-                        " tool_call_id, name, created_at, id, images, metadata)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?)", (session_id, seq, *values))
+                    new_rows.append((session_id, seq, *values))
                     m._cached_images_saved = True
                     continue
 
@@ -176,6 +174,13 @@ class SessionStore:
                     self.db.execute(
                         "UPDATE messages SET " + assignments + " WHERE session_id=? AND seq=?",
                         (*[values[i] for i in changed], session_id, seq))
+
+            if new_rows:
+                # PERF-03: 批量写入，单事务 executemany
+                self.db.executemany(
+                    "INSERT INTO messages (session_id, seq, role, content, tool_calls,"
+                    " tool_call_id, name, created_at, id, images, metadata)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)", new_rows)
 
             if any(seq >= len(serialized) for seq in existing_summary):
                 self.db.execute("DELETE FROM messages WHERE session_id=? AND seq>=?",

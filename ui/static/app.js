@@ -502,7 +502,15 @@ function toggleSearchModal() {
   }
 }
 
+let searchDebounceTimer = null;
 function onSearchInput(query) {
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    _doSearchInput(query);
+  }, 200);
+}
+
+function _doSearchInput(query) {
   const container = document.getElementById("search-results-list");
   if (!container) return;
   const q = (query || "").trim().toLowerCase();
@@ -1075,9 +1083,14 @@ async function deleteCustomModel(modelId) {
   }
 }
 
+let isSwitchingModel = false;
 async function switchModel(modelId, baseUrl = null) {
+  if (isSwitchingModel) return;
+  isSwitchingModel = true;
   const dd = document.getElementById('model-switcher-dropdown');
   if (dd) dd.classList.add('hidden');
+  const triggerBtn = document.getElementById('current-model-btn');
+  if (triggerBtn) triggerBtn.classList.add('opacity-50', 'pointer-events-none');
   toast(`正在切换至主模型: ${modelId}…`);
   try {
     const payload = { model_id: modelId };
@@ -1106,6 +1119,9 @@ async function switchModel(modelId, baseUrl = null) {
     }
   } catch (e) {
     toast("切换请求失败: " + e.message);
+  } finally {
+    isSwitchingModel = false;
+    if (triggerBtn) triggerBtn.classList.remove('opacity-50', 'pointer-events-none');
   }
 }
 
@@ -1209,6 +1225,13 @@ function renderSessions(sessions) {
 }
 
 async function selectSession(id) {
+  // UX-07: 切换会话时自动暂存当前会话输入框草稿
+  const inputEl = document.getElementById("chat-input");
+  if (currentSession && inputEl) {
+    try {
+      localStorage.setItem(`draft_${currentSession}`, inputEl.value || "");
+    } catch (_) {}
+  }
   currentSession = id;
   const sessions = await api("/api/sessions").catch(() => []);
   renderSessions(sessions);
@@ -1228,6 +1251,13 @@ async function selectSession(id) {
     renderMessages(messages);
   } catch (e) {
     console.error("加载消息历史失败:", e);
+  }
+
+  // UX-07: 恢复目标会话的历史输入草稿
+  if (inputEl) {
+    try {
+      inputEl.value = localStorage.getItem(`draft_${id}`) || "";
+    } catch (_) {}
   }
 }
 
@@ -2011,6 +2041,7 @@ function bindComposer() {
     const text = input.value.trim();
     if (!text) return;
     input.value = "";
+    try { localStorage.removeItem(`draft_${currentSession}`); } catch (_) {}
     input.style.height = "auto";
     input.disabled = true;
     sendBtn.disabled = true;

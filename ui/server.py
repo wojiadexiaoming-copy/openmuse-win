@@ -119,10 +119,19 @@ class EventBus:
 class AgentServer:
     def __init__(self, data_dir: str | Path | None = None, startup_progress=None):
         self._startup_progress = startup_progress
-        self.data_dir = Path(data_dir or os.environ.get("ALTEREGO_DATA", str(REPO_ROOT)))
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        from agent.paths import resolve_data_dir
+        self.data_dir = resolve_data_dir(data_dir)
         self._startup_phase("load_config")
-        self.cfg = load_config()
+        raw_cfg = load_config()
+        from agent.config_schema import Config
+        try:
+            validated = Config.model_validate(raw_cfg)
+            self.cfg = validated.model_dump()
+            if not validated.router_enabled:
+                logger.warning("llm_router 未启用或配置缺失，走 LLMClient 主备降级")
+        except Exception as e:
+            logger.error("配置校验失败: %s", e, exc_info=True)
+            raise
 
         # P0-2 补丁：启动时生成或读取 API Token 并持久化至 data_dir/.api_token
         import secrets
@@ -137,7 +146,7 @@ class AgentServer:
             except Exception:
                 pass
 
-        self.port = 5000
+        self._port = 5000
         self._ui_window = None
         self._current_browser_ratio = 0.80
         self.event_bus = EventBus()
@@ -165,10 +174,10 @@ class AgentServer:
         self._startup_phase("open_vault")
         self.vault = Vault.for_machine(self.data_dir) if hasattr(Vault, "for_machine") else Vault(self.data_dir)
         self._startup_phase("initialize_models_and_keys")
-        llm_key = resolve_llm_key(self.vault)
-        backup_key = resolve_backup_llm_key(self.vault)
+        self.llm_key = llm_key = resolve_llm_key(self.vault)
+        self.backup_key = backup_key = resolve_backup_llm_key(self.vault)
         self.llm = LLMClient.from_config(
-            self.cfg, api_key=llm_key, fallback_api_key=backup_key, vault=self.vault)
+            self.cfg, api_key=llm_key, fallback_api_key=backup_key, vault=self.vault, allow_unconfigured=True)
 
         self.registry = ToolRegistry()
         media_key = ""
@@ -318,23 +327,38 @@ class AgentServer:
         self._startup_phase("initialize_memory")
         self.memory = MemoryManager(self.data_dir / "memory")
 
-        self.takeover_mgr = TakeoverManager(event_bus=self.event_bus, on_event=self.emit_event)
+        self.takeover_mgr = TakeoverManager(
+            event_bus=self.event_bus,
+            on_event=self.emit_event,
+            port=self.port,
+            token=self.api_token,
+        )
         set_takeover_manager(self.takeover_mgr)
+
+        summarizer = None
+        try:
+            from agent.compaction import make_worker_summarizer
+            summarizer = make_worker_summarizer(self.cfg, self.vault)
+        except Exception:
+            pass
 
         self.ctx = ContextBuilder(
             max_tokens=self.cfg["context"]["max_context_tokens"],
             extra_system=self.memory.read_main,
+            summarizer=summarizer,
         )
         self._startup_phase("open_conversation_database")
         self.store = SessionStore(str(self.data_dir / "conversations.db"))
         # 启动时检查未完成任务：在归档前先看最新 session 是否有 incomplete 任务
         # 若有，通过 SSE 事件通知前端弹"继续/丢弃"提示
         self._pending_resume_prompt = None
+        keep_sid = None
         try:
             sessions = self.store.list_sessions(limit=1)
             if sessions:
                 latest_sid = sessions[0].get("session_id") or sessions[0].get("id")
                 if latest_sid:
+                    keep_sid = latest_sid
                     incomplete = self.store.get_incomplete_task(latest_sid)
                     if incomplete:
                         self._pending_resume_prompt = {
@@ -348,17 +372,39 @@ class AgentServer:
                             incomplete["task_status"])
         except Exception:
             pass  # 检查失败不阻断启动
-        # 归档旧 session：每次启动时把上一轮的 session 导出到 archive/，主库只保留新 session
+        # 归档旧 session：只归档更早的历史会话，保留最近会话（keep_session_id=keep_sid）
         _archive_dir = str(self.data_dir / "archive")
         try:
-            _archived = self.store.archive_old_sessions(_archive_dir, keep_session_id=None)
+            _archived = self.store.archive_old_sessions(_archive_dir, keep_session_id=keep_sid)
             if _archived:
                 import logging as _log
                 _log.getLogger(__name__).info("archived %d old session(s): %s", len(_archived), _archived)
         except Exception:
             pass  # 归档失败不阻断启动
+
+        # B4-04 保留期自动清理 (archive, uploads, logs, spans.db)
+        try:
+            from agent.retention import run_retention_cleanup
+            _ret_cfg = self.cfg.get("retention", {}) if isinstance(self.cfg, dict) else {}
+            _ret_stats = run_retention_cleanup(
+                self.data_dir,
+                archive_days=int(_ret_cfg.get("archive_days", 30)),
+                upload_days=int(_ret_cfg.get("upload_days", 30)),
+                log_days=int(_ret_cfg.get("log_days", 14)),
+                span_days=int(_ret_cfg.get("span_days", 14)),
+                tracer=self.tracer,
+            )
+            logger.info("Startup retention cleanup: %s", _ret_stats)
+        except Exception as _ret_err:
+            logger.debug("Startup retention cleanup error: %s", _ret_err)
+
         self._startup_phase("initialize_planner")
-        planner_llm = LLMClient.for_role(self.cfg, "planner", self.vault)
+        planner_llm = LLMClient.for_role(
+            self.cfg, "planner", self.vault,
+            api_key=getattr(self, "llm_key", ""),
+            fallback_api_key=getattr(self, "backup_key", ""),
+            allow_unconfigured=True,
+        )
         self._bind_model_observer(planner_llm, "planner")
         self.planner = Planner(planner_llm)
 
@@ -367,10 +413,19 @@ class AgentServer:
             if (role == "code" and not self.cfg.get("llm_router", {}).get("enabled")
                     and "code" not in self.cfg.get("models", {}).get("roles", {})):
                 role = "subagent"
-            sub_llm = LLMClient.for_role(self.cfg, role, self.vault)
+            sub_llm = LLMClient.for_role(
+                self.cfg, role, self.vault,
+                api_key=getattr(self, "llm_key", ""),
+                fallback_api_key=getattr(self, "backup_key", ""),
+                allow_unconfigured=True,
+            )
             if getattr(task, "critical", False):
                 sub_llm = LLMClient.for_role(
-                    self.cfg, self.cfg.get("models", {}).get("critical_subagent_role", "main"), self.vault)
+                    self.cfg, self.cfg.get("models", {}).get("critical_subagent_role", "main"), self.vault,
+                    api_key=getattr(self, "llm_key", ""),
+                    fallback_api_key=getattr(self, "backup_key", ""),
+                    allow_unconfigured=True,
+                )
             self._bind_model_observer(sub_llm, "code" if role == "code" else "subagent")
             sub_prompt_file = Path("prompts/subagent.md")
             sub_prompt = sub_prompt_file.read_text(encoding="utf-8") if sub_prompt_file.exists() else ""
@@ -384,9 +439,84 @@ class AgentServer:
                                 on_event=self.emit_event)
 
         self._startup_phase("initialize_agent")
-        self.sub_mgr = SubagentManager(make_orchestrator=_make_sub_orchestrator)
+        self.sub_mgr = SubagentManager(
+            make_orchestrator=_make_sub_orchestrator,
+            on_queue_update=lambda qsize: self.emit_event("subagent_update", {"queue_waiting": qsize}),
+        )
         for t in make_subagent_tools(self.sub_mgr):
             self.registry.register(t)
+
+        # §28 Connectors / §23 Proactivity / §25 Workflow /
+        # §26 Artifacts / §30 TTS / §34 备份 / 定时单次提醒 (P1-01 对齐 CLI 注册)
+        from agent.tools_registry import ToolDefinition
+        from agent.connectors import ConnectorManager, make_connector_tools
+        from agent.proactivity import ProactivityStore, make_proactivity_tools
+        from agent.workflow import WorkflowEngine, make_workflow_tools
+        from agent.artifacts import ArtifactManager, make_artifact_tools
+        from agent.tts import TTSManager, make_tts_tools
+        from agent.backup import make_backup_tools
+        try:
+            for t in make_connector_tools(ConnectorManager(vault=self.vault)):
+                self.registry.register(t)
+        except Exception as e:
+            logger.warning("[server] Failed to register connector tools: %s", e)
+
+        try:
+            for t in make_proactivity_tools(ProactivityStore()):
+                self.registry.register(t)
+        except Exception as e:
+            logger.warning("[server] Failed to register proactivity tools: %s", e)
+
+        try:
+            for t in make_workflow_tools(WorkflowEngine()):
+                self.registry.register(t)
+        except Exception as e:
+            logger.warning("[server] Failed to register workflow tools: %s", e)
+
+        try:
+            for t in make_artifact_tools(ArtifactManager()):
+                self.registry.register(t)
+        except Exception as e:
+            logger.warning("[server] Failed to register artifact tools: %s", e)
+
+        try:
+            for t in make_tts_tools(TTSManager()):
+                self.registry.register(t)
+        except Exception as e:
+            logger.warning("[server] Failed to register tts tools: %s", e)
+
+        try:
+            for t in make_backup_tools():
+                self.registry.register(t)
+        except Exception as e:
+            logger.warning("[server] Failed to register backup tools: %s", e)
+
+        def _schedule_once(args: dict) -> str:
+            try:
+                secs = int(args.get("seconds", 0))
+                brief = args.get("brief", "")
+                if secs <= 0:
+                    return "[工具执行失败] seconds 必须 > 0"
+                if not hasattr(self, "orch") or self.orch is None:
+                    return "[工具执行失败] Orchestrator 未就绪"
+                jid = self.orch.schedule_once(secs, brief)
+                return f"[定时已设置] {secs} 秒后提醒：{brief[:50]}（job={jid}）"
+            except Exception as e:
+                return f"[工具执行失败] {e}"
+
+        self.registry.register(ToolDefinition(
+            name="schedule_once",
+            description="N 秒后提醒我做某事（替代 sleep 硬等）。到时会自动注入提醒。",
+            parameters={"type": "object",
+                         "properties": {
+                             "seconds": {"type": "integer", "description": "几秒后"},
+                             "brief": {"type": "string", "description": "到时提醒做什么"}},
+                         "required": ["seconds", "brief"]},
+            func=_schedule_once,
+            parallel_safe=False,
+            is_readonly=False,
+            cacheable=False,
+        ))
 
         self.orch = Orchestrator(
             self.llm,
@@ -566,10 +696,11 @@ class AgentServer:
             llm_key = resolve_llm_key(self.vault)
         backup_key = resolve_backup_llm_key(self.vault)
         new_llm = LLMClient.from_config(
-            self.cfg, api_key=llm_key, fallback_api_key=backup_key, vault=self.vault)
+            self.cfg, api_key=llm_key, fallback_api_key=backup_key, vault=self.vault, allow_unconfigured=True)
         new_planner = getattr(self, "planner", None)
         if new_planner is not None or self.cfg.get("agent", {}).get("planner", False):
-            planner_llm = LLMClient.for_role(self.cfg, "planner", self.vault)
+            planner_llm = LLMClient.for_role(
+                self.cfg, "planner", self.vault, api_key=llm_key, fallback_api_key=backup_key, allow_unconfigured=True)
             self._bind_model_observer(planner_llm, "planner")
             new_planner = Planner(planner_llm)
         self._bind_model_observer(new_llm, "ui")
@@ -580,6 +711,16 @@ class AgentServer:
         self.orch.llm = new_llm
         self._observed_model = ""
         self._refresh_model_status()
+
+    @property
+    def port(self) -> int:
+        return getattr(self, "_port", 5000)
+
+    @port.setter
+    def port(self, value: int):
+        self._port = int(value)
+        if hasattr(self, "takeover_mgr") and self.takeover_mgr is not None:
+            self.takeover_mgr.port = self._port
 
     def set_ui_window(self, window):
         """保存原生桌面 PyWebView 窗口实例，用于分屏联动。"""
@@ -611,7 +752,27 @@ class AgentServer:
                 logger.error("runtime_log_write_failed")
 
     def _record_chat_error(self, sid: str, exc: Exception) -> dict:
-        error_text = f"⚠️ 执行出现异常（{type(exc).__name__}），本轮未完成，请重试。"
+        exc_type = type(exc).__name__
+        detail = str(exc)
+        if "AuthenticationError" in exc_type or "401" in detail:
+            error_text = (
+                f"⚠️ 大模型鉴权失败 ({exc_type})：API Key 无效或未授权。\n"
+                "提示：若您使用的是本地代理密钥（如 eb-local-...），请勿将其用于云端模型（如 Agnes）；"
+                "请点击右上方【设置】填写真实有效的 API Key 后重试。"
+            )
+        elif "InternalServerError" in exc_type or "500" in detail:
+            cur_m = getattr(self.llm, "model", "")
+            cur_url = getattr(self.llm, "base_url", "")
+            error_text = (
+                f"⚠️ 模型端点返回服务内部错误 ({exc_type} 500)。\n"
+                f"当前访问端点: {cur_m} ({cur_url})\n"
+                "原因排查：\n"
+                "1. 若使用的是本地代理 (127.0.0.1:53683)，请检查本地代理服务是否正常运行，其绑定的上游账号是否有效登录；\n"
+                "2. 若在虚拟机中运行，请确认代理是否开启局域网共享 (Allow LAN) 并改用宿主机局域网 IP；\n"
+                "3. 部分本地代理 auto 模式不支持智能体工具链 (Tool Calling)，建议切换至支持 Function Call 的模型（如 Agnes 或阿里云百炼）。"
+            )
+        else:
+            error_text = f"⚠️ 执行出现异常（{exc_type}）：{detail[:160]}，请检查网络或模型配置后重试。"
         error_message = Message(role="assistant", content=error_text)
         self.orch.history.append(error_message)
         self.orch.last_turn_status = "error"
@@ -778,13 +939,11 @@ class AgentServer:
             if (request.path.startswith("/api/")
                     and not request.path.startswith("/api/health")
                     and not request.path.startswith("/api/avatar/")
-                    and not request.path.startswith("/api/weixin/qr_img")
-                    and not request.path.startswith("/api/approvals/toast_resolve")
-                    and not request.path.endswith("/focus")):
-                auth_header = request.headers.get("Authorization", "").strip()
+                    and not request.path.startswith("/api/weixin/qr_img")):
+                auth_header = (request.headers.get("Authorization") or request.environ.get("HTTP_AUTHORIZATION", "")).strip()
                 token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else auth_header
                 if not token:
-                    token = request.headers.get("X-AlterEgo-Token", "").strip()
+                    token = (request.headers.get("X-AlterEgo-Token") or request.environ.get("HTTP_X_ALTEREGO_TOKEN", "")).strip()
                 if not token:
                     token = request.query.get("token", "").strip()
                 import secrets
@@ -828,8 +987,37 @@ class AgentServer:
             self._pending_resume_prompt = None
             return {"ok": True}
 
+        @app.route("/api/backup", method="GET")
+        def api_list_backups():
+            """列出所有历史备份。"""
+            from agent.backup import list_backups
+            return {"backups": list_backups(workspace=str(self.data_dir))}
+
+        @app.route("/api/backup", method="POST")
+        def api_run_backup():
+            """触发手动备份或恢复自检。"""
+            action = (request.json or {}).get("action", "backup")
+            if action == "verify":
+                from agent.backup import verify_restore
+                v = verify_restore(workspace=str(self.data_dir))
+                return {"success": True, "verification": v}
+            from agent.backup import backup_job
+            zip_p = backup_job(workspace=str(self.data_dir))
+            return {
+                "success": True,
+                "backup_file": zip_p,
+                "size": os.path.getsize(zip_p) if os.path.exists(zip_p) else 0
+            }
+
         # 可切换的主模型列表（支持预设推荐、配置文件动态发现与用户自定义模型）
         PRESET_MODELS = [
+            {"id": "auto", "name": "Local Auto (127.0.0.1:53683)",
+             "base_url": "http://127.0.0.1:53683/v1",
+             "desc": "本地代理服务 (EchoBird / Codex-LB) · 自动智能路由与分发",
+             "tag": "本地直连",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "ECHOBIRD_API_KEY", "vault_key": "echobird_api_key"},
             {"id": "agnes-3.0-flash", "name": "Agnes 3.0 Flash",
              "base_url": "https://apihub.agnes-ai.com/v1",
              "desc": "Agnes API Hub · 全模态零延迟无速率限制",
@@ -891,6 +1079,25 @@ class AgentServer:
 
         data_dir = getattr(self, "data_dir", None) or Path(".")
         custom_models_file = data_dir / "custom_models.json"
+        deleted_models_file = data_dir / "deleted_models.json"
+
+        def _load_deleted_models() -> set[str]:
+            if deleted_models_file.is_file():
+                try:
+                    with open(deleted_models_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        return set(data)
+                except Exception as exc:
+                    logger.debug("读取 deleted_models.json 异常: %s", exc)
+            return set()
+
+        def _save_deleted_models(model_ids: set[str]):
+            try:
+                with open(deleted_models_file, "w", encoding="utf-8") as f:
+                    json.dump(list(model_ids), f, ensure_ascii=False, indent=2)
+            except Exception as exc:
+                logger.warning("保存 deleted_models.json 异常: %s", exc)
 
         def _load_custom_models() -> list[dict]:
             if custom_models_file.is_file():
@@ -913,18 +1120,23 @@ class AgentServer:
         def _get_dynamic_models() -> list[dict]:
             """动态组装模型列表：预设模型 + 用户自定义模型 + config.yaml 中配置项 + 当前生效模型。"""
             seen_ids = set()
+            deleted_ids = _load_deleted_models()
+            anchor_id = PRESET_MODELS[0]["id"]
             result = []
 
-            # 1. 预置基础模型
+            # 1. 预置基础模型（排除被用户删除的非核心模型）
             for m in PRESET_MODELS:
+                mid = m["id"]
+                if mid in deleted_ids and mid != anchor_id:
+                    continue
                 m_copy = dict(m)
-                seen_ids.add(m_copy["id"])
+                seen_ids.add(mid)
                 result.append(m_copy)
 
-            # 2. 用户持久化的自定义模型（优先识别为自定义标签与属性）
+            # 2. 用户持久化的自定义模型
             for cm in _load_custom_models():
                 mid = cm.get("id")
-                if mid and mid not in seen_ids:
+                if mid and mid not in seen_ids and (mid not in deleted_ids or mid == anchor_id):
                     seen_ids.add(mid)
                     cm_entry = dict(cm)
                     cm_entry.setdefault("tag", "自定义")
@@ -1008,16 +1220,27 @@ class AgentServer:
                 except (PermissionError, KeyError):
                     pass
 
-            # 3. 供应商前缀智能推断 (Agnes / DashScope / Gemini / DeepSeek 等)
+            # 3. 供应商前缀智能推断 (Agnes / DashScope / Gemini / DeepSeek / EchoBird / Anthropic 等)
             provider_candidates = []
+            is_specific_provider = False
             if "agnes" in mid or "agnes" in base_url:
+                is_specific_provider = True
                 provider_candidates.extend([("ALTEREGO_AGNES_API_KEY", "agnes_api_key"), ("AGNES_API_KEY", "")])
             if any(k in mid or k in base_url for k in ("qwen", "dashscope", "kimi", "aliyuncs")):
+                is_specific_provider = True
                 provider_candidates.extend([("DASHSCOPE_API_KEY", "dashscope_api_key")])
             if "gemini" in mid or "google" in base_url:
+                is_specific_provider = True
                 provider_candidates.extend([("ALTEREGO_GEMINI_API_KEY", "gemini_api_key"), ("GEMINI_API_KEY", "")])
             if "deepseek" in mid or "deepseek" in base_url:
+                is_specific_provider = True
                 provider_candidates.extend([("DEEPSEEK_API_KEY", "deepseek_api_key")])
+            if "echobird" in mid or "127.0.0.1:53683" in base_url or "eb-local" in mid or mid == "auto":
+                is_specific_provider = True
+                provider_candidates.extend([("ECHOBIRD_API_KEY", "echobird_api_key")])
+            if "claude" in mid or "anthropic" in mid or "anthropic" in base_url:
+                is_specific_provider = True
+                provider_candidates.extend([("ANTHROPIC_API_KEY", "anthropic_api_key")])
 
             for penv, pvault in provider_candidates:
                 if penv:
@@ -1032,15 +1255,34 @@ class AgentServer:
                     except (PermissionError, KeyError):
                         pass
 
-            # 4. Fallback 通用 key
+            # 4. Fallback 通用环境变量与 Vault key
+            # 严格防止将本地专用 token (如 Antigravity / eb-local-) 或 Gemini (AQ.) 错误传递给公网厂商导致 401
+            def _is_safe_fallback_key(v: str) -> bool:
+                if not v:
+                    return False
+                # 若针对 Agnes / Claude / DeepSeek 等外部云端模型，绝不可注入本地代理专属 token 或 AQ. 前缀 key
+                if any(k in mid or k in base_url for k in ("agnes", "claude", "anthropic", "deepseek", "openai")):
+                    if v.startswith("Antigravity") or v.startswith("eb-local-") or v.startswith("AQ."):
+                        return False
+                # 若针对本地代理 (EchoBird / 127.0.0.1:53683 / auto)，绝不可注入外部专有 key (如 AQ.、sk-、cfat_)
+                if any(k in mid or k in base_url for k in ("echobird", "53683", "auto")):
+                    if not v.startswith("eb-local-"):
+                        return False
+                return True
+
+            env_key = os.environ.get("ALTEREGO_LLM_API_KEY", "").strip() or os.environ.get("LLM_API_KEY", "").strip()
+            if _is_safe_fallback_key(env_key):
+                return env_key
+
             if vault and hasattr(vault, "resolve"):
                 try:
                     val = vault.resolve("llm_api_key", caller="ui.server")
-                    if val:
+                    if _is_safe_fallback_key(val):
                         return val
                 except (PermissionError, KeyError):
                     pass
-            return os.environ.get("ALTEREGO_LLM_API_KEY", "").strip()
+
+            return ""
 
         def _extract_roles_info() -> dict:
             """提取各角色的当前生效模型与端点信息。"""
@@ -1062,7 +1304,7 @@ class AgentServer:
             worker_cfg = roles_cfg.get("worker", {}) if isinstance(roles_cfg.get("worker"), dict) else {}
             sub_cfg = roles_cfg.get("subagent", {}) if isinstance(roles_cfg.get("subagent"), dict) else {}
 
-            return {
+            roles_info = {
                 "main": {
                     "name": "👑 主脑 (Main Brain)",
                     "desc": "核心对话、意图识别与任务调度",
@@ -1100,43 +1342,60 @@ class AgentServer:
                     "supports_images": fb_cfg.get("supports_images", False),
                 }
             }
+            for r in roles_info.values():
+                m_id = r.get("model") or ""
+                b_url = r.get("base_url") or ""
+                r["has_key"] = bool(_resolve_model_key({"id": m_id, "base_url": b_url})) if m_id else False
+            return roles_info
 
-        def _persist_config_roles():
-            """将角色与模型更新安全持久化到根目录 config.yaml 中（保留所有注释与排版）。"""
+        def _persist_config_roles() -> bool:
+            """将角色与模型更新安全持久化到根目录 config.yaml 中（优先保留所有注释与排版）。"""
+            cfg_path = REPO_ROOT / "config.yaml"
+            if not cfg_path.is_file():
+                return False
             try:
-                from ruamel.yaml import YAML
-                yaml_loader = YAML()
-                yaml_loader.preserve_quotes = True
-                cfg_path = REPO_ROOT / "config.yaml"
-                if cfg_path.is_file():
+                try:
+                    from ruamel.yaml import YAML
+                    yaml_loader = YAML()
+                    yaml_loader.preserve_quotes = True
                     with open(cfg_path, "r", encoding="utf-8") as f:
                         disk_data = yaml_loader.load(f) or {}
-                    disk_data.setdefault("models", {}).setdefault("roles", {})
-                    for rk, rv in self.cfg.get("models", {}).get("roles", {}).items():
-                        if isinstance(rv, dict):
-                            disk_data["models"]["roles"].setdefault(rk, {})
-                            if "model" in rv:
-                                disk_data["models"]["roles"][rk]["model"] = rv["model"]
-                            if "base_url" in rv:
-                                disk_data["models"]["roles"][rk]["base_url"] = rv["base_url"]
-                            if "supports_images" in rv:
-                                disk_data["models"]["roles"][rk]["supports_images"] = rv["supports_images"]
-                            if "ref" in rv:
-                                disk_data["models"]["roles"][rk]["ref"] = rv["ref"]
-                            elif "ref" in disk_data["models"]["roles"][rk]:
-                                del disk_data["models"]["roles"][rk]["ref"]
-                    if "llm" in self.cfg and "llm" in disk_data:
-                        disk_data["llm"]["model"] = self.cfg["llm"].get("model")
-                        disk_data["llm"]["base_url"] = self.cfg["llm"].get("base_url")
-                        if "fallback" in self.cfg["llm"]:
-                            disk_data["llm"].setdefault("fallback", {})
-                            disk_data["llm"]["fallback"]["model"] = self.cfg["llm"]["fallback"].get("model")
-                            disk_data["llm"]["fallback"]["base_url"] = self.cfg["llm"]["fallback"].get("base_url")
-                            disk_data["llm"]["fallback"]["enabled"] = self.cfg["llm"]["fallback"].get("enabled", True)
-                    with open(cfg_path, "w", encoding="utf-8") as f:
-                        yaml_loader.dump(disk_data, f)
+                    dump_func = lambda data, stream: yaml_loader.dump(data, stream)
+                except ImportError:
+                    import yaml
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        disk_data = yaml.safe_load(f) or {}
+                    dump_func = lambda data, stream: yaml.dump(data, stream, allow_unicode=True, sort_keys=False)
+
+                disk_data.setdefault("models", {}).setdefault("roles", {})
+                for rk, rv in self.cfg.get("models", {}).get("roles", {}).items():
+                    if isinstance(rv, dict):
+                        disk_data["models"]["roles"].setdefault(rk, {})
+                        if "model" in rv:
+                            disk_data["models"]["roles"][rk]["model"] = rv["model"]
+                        if "base_url" in rv:
+                            disk_data["models"]["roles"][rk]["base_url"] = rv["base_url"]
+                        if "supports_images" in rv:
+                            disk_data["models"]["roles"][rk]["supports_images"] = rv["supports_images"]
+                        if "ref" in rv:
+                            disk_data["models"]["roles"][rk]["ref"] = rv["ref"]
+                        elif "ref" in disk_data["models"]["roles"][rk]:
+                            del disk_data["models"]["roles"][rk]["ref"]
+                if "llm" in self.cfg and "llm" in disk_data:
+                    disk_data["llm"]["model"] = self.cfg["llm"].get("model")
+                    disk_data["llm"]["base_url"] = self.cfg["llm"].get("base_url")
+                    if "fallback" in self.cfg["llm"]:
+                        disk_data["llm"].setdefault("fallback", {})
+                        disk_data["llm"]["fallback"]["model"] = self.cfg["llm"]["fallback"].get("model")
+                        disk_data["llm"]["fallback"]["base_url"] = self.cfg["llm"]["fallback"].get("base_url")
+                        disk_data["llm"]["fallback"]["enabled"] = self.cfg["llm"]["fallback"].get("enabled", True)
+
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    dump_func(disk_data, f)
+                return True
             except Exception as exc:
-                logger.warning("持久化 config.yaml 角色配置异常: %s", exc)
+                logger.error("持久化 config.yaml 角色配置异常: %s", exc, exc_info=True)
+                return False
 
         @app.route("/api/models", method="GET")
         def list_models():
@@ -1159,7 +1418,7 @@ class AgentServer:
             if not model_id:
                 return {"ok": False, "error": "模型标识不能为空"}
 
-            target_role = str(data.get("target_role") or "main").strip().lower()
+            target_role = str(data.get("target_role") or data.get("role") or "main").strip().lower()
             if target_role not in {"main", "worker", "subagent", "planner", "fallback", "all"}:
                 target_role = "main"
 
@@ -1180,7 +1439,7 @@ class AgentServer:
                 # 按厂商类型智能补存专属命名 key
                 mid_lower = model_id.lower()
                 burl_lower = (base_url or "").lower()
-                if "agnes" in mid_lower or "agnes" in burl_lower:
+                if ("agnes" in mid_lower or "agnes" in burl_lower) and not api_key.startswith("eb-local-"):
                     try:
                         vault.set("agnes_api_key", api_key)
                     except Exception:
@@ -1200,7 +1459,7 @@ class AgentServer:
                         vault.set("deepseek_api_key", api_key)
                     except Exception:
                         pass
-                elif "echobird" in mid_lower or "127.0.0.1:53683" in burl_lower or "eb-local" in api_key:
+                elif "echobird" in mid_lower or "53683" in burl_lower or "eb-local" in api_key or mid_lower == "auto":
                     try:
                         vault.set("echobird_api_key", api_key)
                     except Exception:
@@ -1315,7 +1574,8 @@ class AgentServer:
                     return {"ok": False, "error": str(exc)}
 
             # 3. 持久化到 config.yaml
-            _persist_config_roles()
+            if not _persist_config_roles():
+                logger.warning("模型已在内存中热切换生效，但写入 config.yaml 失败，重启后将恢复旧配置")
 
             if target_role in ("main", "all"):
                 self.state_snapshot["status"]["current_model"] = target["id"]
@@ -1348,28 +1608,135 @@ class AgentServer:
 
         @app.route("/api/models/<model_id:path>", method="DELETE")
         def delete_custom_model(model_id):
-            """删除用户添加的自定义模型。"""
+            """删除用户添加的自定义模型。
+            
+            若被删除的模型正被任何渠道角色（main/worker/subagent/planner/fallback）使用，
+            则对应渠道自动回退并重置为第一个可用模型（models[0]），持久化至 config.yaml 并热重载客户端。
+            """
+            from urllib.parse import unquote
+            model_id = unquote(str(model_id or "")).strip()
+            if not model_id:
+                return {"ok": False, "error": "模型标识不能为空"}
+
+            anchor_id = PRESET_MODELS[0]["id"]
+            if model_id == anchor_id:
+                return {"ok": False, "error": f"系统核心容灾锚点模型 [{anchor_id}] 不可删除"}
+
+            # 1. 记录到 deleted_models.json，确保在可用模型列表中隐藏并永久排除
+            del_set = _load_deleted_models()
+            del_set.add(model_id)
+            _save_deleted_models(del_set)
+
+            # 2. 如果存在于 custom_models.json，一并从自定义模型列表中移除
             custom_list = _load_custom_models()
+            orig_len = len(custom_list)
             new_list = [m for m in custom_list if m.get("id") != model_id]
-            if len(new_list) < len(custom_list):
+            if len(new_list) < orig_len:
                 _save_custom_models(new_list)
-                # 若删除的模型正是当前配置中生效的主模型，回退至默认主模型
-                if self.cfg.get("llm", {}).get("model") == model_id or self._model_name(self.llm) == model_id:
-                    default_m = PRESET_MODELS[0]
-                    self.cfg.setdefault("llm", {})["model"] = default_m["id"]
-                    self.cfg["llm"]["base_url"] = default_m["base_url"]
-                    roles = self.cfg.setdefault("models", {}).setdefault("roles", {})
-                    roles.setdefault("main", {})["model"] = default_m["id"]
-                    roles["main"]["base_url"] = default_m["base_url"]
-                    model_key = _resolve_model_key(default_m)
-                    if model_key:
-                        try:
-                            with self.turn_lock:
-                                self._reload_model_clients(api_key_override=model_key)
-                        except Exception:
-                            pass
-                return {"ok": True, "deleted": model_id}
-            return {"ok": False, "error": "未找到该自定义模型或预设模型不可删除"}
+
+            # 确定回退模型：列表中除去当前删除模型后的第一个可用模型（默认 PRESET_MODELS[0] 即 auto）
+            remaining_models = [m for m in _get_dynamic_models() if m.get("id") != model_id]
+            default_m = remaining_models[0] if remaining_models else PRESET_MODELS[0]
+            def_id = default_m["id"]
+            def_url = default_m.get("base_url", "")
+            def_img = bool(default_m.get("supports_images", True))
+
+            roles = self.cfg.setdefault("models", {}).setdefault("roles", {})
+            reset_roles = []
+
+            # 1. 检查主模型 (main 角色与 top-level cfg["llm"])
+            main_cfg = roles.get("main") if isinstance(roles.get("main"), dict) else {}
+            llm_cfg = self.cfg.get("llm") if isinstance(self.cfg.get("llm"), dict) else {}
+            if (
+                llm_cfg.get("model") == model_id
+                or self._model_name(self.llm) == model_id
+                or main_cfg.get("model") == model_id
+            ):
+                self.cfg.setdefault("llm", {})["model"] = def_id
+                self.cfg["llm"]["base_url"] = def_url
+                self.cfg["llm"]["supports_images"] = def_img
+                roles.setdefault("main", {})["model"] = def_id
+                roles["main"]["base_url"] = def_url
+                roles["main"]["supports_images"] = def_img
+                reset_roles.append("main")
+
+            # 2. 检查后台工作者 (worker)
+            worker_cfg = roles.get("worker")
+            if isinstance(worker_cfg, dict) and worker_cfg.get("model") == model_id:
+                worker_cfg["model"] = def_id
+                worker_cfg["base_url"] = def_url
+                worker_cfg["supports_images"] = False
+                reset_roles.append("worker")
+
+            # 3. 检查子任务智能体 (subagent)
+            sub_cfg = roles.get("subagent")
+            if isinstance(sub_cfg, dict) and sub_cfg.get("model") == model_id:
+                sub_cfg["model"] = def_id
+                sub_cfg["base_url"] = def_url
+                sub_cfg["supports_images"] = def_img
+                reset_roles.append("subagent")
+
+            # 4. 检查任务规划器 (planner)
+            planner_cfg = roles.get("planner")
+            if isinstance(planner_cfg, dict) and planner_cfg.get("model") == model_id:
+                if "ref" in planner_cfg:
+                    del planner_cfg["ref"]
+                planner_cfg["model"] = def_id
+                planner_cfg["base_url"] = def_url
+                planner_cfg["supports_images"] = False
+                reset_roles.append("planner")
+
+            # 5. 检查容灾兜底 (fallback)
+            fb_llm = llm_cfg.get("fallback") if isinstance(llm_cfg.get("fallback"), dict) else {}
+            fb_main = main_cfg.get("fallback") if isinstance(main_cfg.get("fallback"), dict) else {}
+            if fb_llm.get("model") == model_id or fb_main.get("model") == model_id:
+                if "fallback" in self.cfg.get("llm", {}):
+                    self.cfg["llm"]["fallback"]["model"] = def_id
+                    self.cfg["llm"]["fallback"]["base_url"] = def_url
+                if "fallback" in roles.get("main", {}):
+                    roles["main"]["fallback"]["model"] = def_id
+                    roles["main"]["fallback"]["base_url"] = def_url
+                reset_roles.append("fallback")
+
+            # 若有角色重置，则持久化到 config.yaml 并重新加载模型客户端
+            if reset_roles:
+                _persist_config_roles()
+                def_key = _resolve_model_key(default_m)
+                try:
+                    with self.turn_lock:
+                        self._reload_model_clients(api_key_override=def_key or "")
+                except Exception as exc:
+                    logger.warning("删除模型重置后重载客户端异常: %s", exc)
+
+                if "main" in reset_roles:
+                    self.state_snapshot["status"]["current_model"] = def_id
+                    self._refresh_model_status()
+                    self.emit_event("model_switched", {
+                        "target_role": "main",
+                        "model": def_id,
+                        "base_url": def_url,
+                    })
+
+            self.emit_event("model_deleted", {
+                "deleted": model_id,
+                "fallback_model": def_id,
+                "reset_roles": reset_roles,
+            })
+
+            updated_models = [{k: v for k, v in m.items() if not k.startswith("key_") and k != "vault_key"}
+                              for m in _get_dynamic_models()]
+            for m in updated_models:
+                m["has_key"] = bool(_resolve_model_key(m))
+
+            return {
+                "ok": True,
+                "deleted": model_id,
+                "fallback_model": def_id,
+                "reset_roles": reset_roles,
+                "current": self._model_name(self.llm),
+                "models": updated_models,
+                "roles": _extract_roles_info(),
+            }
 
         # 静态文件
         @app.route("/")
@@ -1381,13 +1748,35 @@ class AgentServer:
         def takeover():
             return static_file("takeover.html", root=str(UI_DIR))
 
+        @app.route("/settings")
+        @app.route("/settings.html")
+        def settings_page():
+            return static_file("settings.html", root=str(UI_DIR))
+
+        @app.route("/api/open_settings_window", method=["GET", "POST"])
+        def open_settings_window():
+            token = self.api_token
+            port = self.port
+            try:
+                from ui.settings_window import open_settings_window_async
+                proc = open_settings_window_async(port=port, token=token)
+                return {"ok": bool(proc is not None)}
+            except Exception as e:
+                logger.warning("[server] 打开独立设置子窗口失败: %s", e)
+                return {"ok": False, "error": str(e)}
+
         @app.route("/static/<filepath:path>")
         def server_static(filepath):
             return static_file(filepath, root=str(UI_DIR / "static"))
 
         @app.route("/uploads/<filepath:path>")
         def get_upload(filepath):
-            return static_file(filepath, root=str(self.data_dir / "uploads"))
+            res = static_file(filepath, root=str(self.data_dir / "uploads"))
+            res.set_header("X-Content-Type-Options", "nosniff")
+            ext = Path(filepath).suffix.lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+                res.set_header("Content-Disposition", f'attachment; filename="{Path(filepath).name}"')
+            return res
 
         # 智能体形象动图路由（支持纯英文别名与原始中文路径）
         AVATAR_MAP = {
@@ -1588,13 +1977,19 @@ class AgentServer:
                         cancelled = isinstance(res, Message) and res.metadata.get("tool_cancelled") is True
                         is_err = cancelled or tool_result_is_error(res)
                         result_content = res.content if isinstance(res, Message) else res
+                        if self.vault:
+                            if isinstance(result_content, str):
+                                result_content = self.vault.scrub(result_content)
+                            res_sum = self.vault.scrub(result_summary(res, max_len=60))
+                        else:
+                            res_sum = result_summary(res, max_len=60)
                         tool_calls_info.append({
                             "tool": tc.name,
                             "args": tc.arguments,
                             "summary": tool_summary(tc.name, tc.arguments),
                             "status": "cancelled" if cancelled else ("error" if is_err else "ok"),
                             "result": result_content,  # 返回全文供右栏/详情查看
-                            "result_summary": result_summary(res, max_len=60),
+                            "result_summary": res_sum,
                         })
 
                 # B7: 历史记录过滤潜在密钥
@@ -1641,7 +2036,41 @@ class AgentServer:
                     self.store.update_title(sid, new_title)
 
                 # 立即持久化用户消息，支持多模态图片传入（spec §24）
-                images_raw = data.get("images") or []
+                images_raw = list(data.get("images") or [])
+                # 兼容 upload_id / upload_ids 传入及正文中 /uploads/ 附件自动提取
+                upload_ids = []
+                if isinstance(data.get("upload_id"), str) and data.get("upload_id"):
+                    upload_ids.append(data.get("upload_id"))
+                if isinstance(data.get("upload_ids"), list):
+                    upload_ids.extend([str(uid) for uid in data.get("upload_ids") if uid])
+
+                uploads_dir = (self.data_dir if hasattr(self, "data_dir") else Path(".")) / "uploads"
+                import re as _re, base64 as _base64
+                found_upload_names = _re.findall(r"/uploads/([a-zA-Z0-9_\-\.]+)", content)
+                for uname in found_upload_names:
+                    up_path = uploads_dir / uname
+                    if up_path.is_file():
+                        ext = up_path.suffix.lower()
+                        if ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                            mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else ("image/gif" if ext == ".gif" else "image/jpeg"))
+                            try:
+                                b64 = _base64.b64encode(up_path.read_bytes()).decode("ascii")
+                                images_raw.append({"data_base64": b64, "mime_type": mime})
+                            except Exception:
+                                pass
+
+                for uid in upload_ids:
+                    matches = list(uploads_dir.glob(f"{uid}.*")) if uploads_dir.is_dir() else []
+                    for match_file in matches:
+                        ext = match_file.suffix.lower()
+                        if ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                            mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
+                            try:
+                                b64 = _base64.b64encode(match_file.read_bytes()).decode("ascii")
+                                images_raw.append({"data_base64": b64, "mime_type": mime})
+                            except Exception:
+                                pass
+
                 image_parts = []
                 for img_item in images_raw:
                     if isinstance(img_item, dict):
@@ -1674,7 +2103,14 @@ class AgentServer:
                     for rec in self.orch.last_turn_tool_records:
                         rec_copy = dict(rec)
                         rec_copy["summary"] = tool_summary(rec.get("tool", ""), rec.get("args"))
-                        rec_copy["result_summary"] = result_summary(rec.get("result", ""), max_len=60)
+                        res_sum = result_summary(rec.get("result", ""), max_len=60)
+                        if self.vault:
+                            if "result" in rec_copy and isinstance(rec_copy["result"], str):
+                                rec_copy["result"] = self.vault.scrub(rec_copy["result"])
+                            if "summary" in rec_copy and isinstance(rec_copy["summary"], str):
+                                rec_copy["summary"] = self.vault.scrub(rec_copy["summary"])
+                            res_sum = self.vault.scrub(res_sum)
+                        rec_copy["result_summary"] = res_sum
                         tool_calls.append(rec_copy)
 
                     msg_obj = {
@@ -1746,12 +2182,19 @@ class AgentServer:
             data = request.json or {}
             approved = bool(data.get("approved"))
             scope = data.get("scope", "once")
+            version_id = data.get("version_id")
             try:
-                ok = self.approval.resolve_card(aid, approved, scope)
-                if not ok:
-                    response.status = 404
-                    return {"error": "not_found"}
-                return {"approval_id": aid, "approved": approved, "scope": scope}
+                res = self.approval.resolve_card(aid, approved, scope, version_id=version_id)
+                if not isinstance(res, dict) or not res.get("ok"):
+                    reason = res.get("reason", "error") if isinstance(res, dict) else "error"
+                    if reason == "not_found":
+                        response.status = 404
+                    elif reason in ("already_consumed", "version_conflict"):
+                        response.status = 409
+                    else:
+                        response.status = 400
+                    return res if isinstance(res, dict) else {"error": reason}
+                return {"approval_id": aid, "approved": approved, "scope": scope, "version_id": res.get("version_id")}
             except ValueError as e:
                 response.status = 400
                 return {"error": str(e)}
@@ -1759,11 +2202,18 @@ class AgentServer:
         @app.route("/api/approvals/toast_resolve", method=["GET", "POST"])
         def toast_resolve():
             aid = request.query.get("id") or (request.json or {}).get("id")
-            token = request.query.get("token") or request.headers.get("X-AlterEgo-Token") or ""
+            token = (
+                request.query.get("token")
+                or request.headers.get("X-AlterEgo-Token")
+                or (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+                or ""
+            )
             import secrets
-            if self.api_token and token and not secrets.compare_digest(token, self.api_token):
+            if self.api_token and (not token or not secrets.compare_digest(token, self.api_token)):
                 response.status = 401
-                return "<p style='font-family: sans-serif; color: red;'>未授权：Token 无效</p>"
+                if request.headers.get("X-AlterEgo-Token") or "application/json" in request.headers.get("Accept", ""):
+                    return {"error": "unauthorized"}
+                return "<p style='font-family: sans-serif; color: red;'>未授权：Token 无效或缺失</p>"
             if not aid:
                 response.status = 400
                 return "<p style='font-family: sans-serif; color: red;'>错误：缺少审批 ID</p>"
@@ -1773,7 +2223,8 @@ class AgentServer:
             scope = request.query.get("scope", "once")
 
             try:
-                ok = self.approval.resolve_card(aid, approved, scope)
+                res = self.approval.resolve_card(aid, approved, scope)
+                ok = isinstance(res, dict) and bool(res.get("ok"))
                 if ok:
                     self.emit_event("approval_resolved", {
                         "approval_id": aid,
@@ -1782,9 +2233,18 @@ class AgentServer:
                     })
             except Exception:
                 ok = False
+                res = {"ok": False, "reason": "exception"}
 
             if request.headers.get("X-AlterEgo-Token") or "application/json" in request.headers.get("Accept", ""):
-                return {"ok": bool(ok), "approval_id": aid, "approved": approved, "scope": scope}
+                if not ok:
+                    reason = res.get("reason", "error") if isinstance(res, dict) else "error"
+                    if reason == "not_found":
+                        response.status = 404
+                    elif reason in ("already_consumed", "version_conflict"):
+                        response.status = 409
+                    else:
+                        response.status = 400
+                return {"ok": bool(ok), "approval_id": aid, "approved": approved, "scope": scope, "reason": res.get("reason") if isinstance(res, dict) else None}
 
             action_text = "✔ 已批准授权" if approved else "✕ 已拒绝授权"
             color = "#10b981" if approved else "#ef4444"
@@ -1856,13 +2316,8 @@ class AgentServer:
             ui_geo = layout["ui"]
             b_geo = layout["browser"]
 
-            # 1. 调整原生 AlterEgo UI 桌面窗口尺寸与坐标
-            if getattr(self, "_ui_window", None):
-                try:
-                    self._ui_window.move(ui_geo["x"], ui_geo["y"])
-                    self._ui_window.resize(ui_geo["width"], ui_geo["height"])
-                except Exception as _werr:
-                    logger.debug("Move/resize ui window error: %s", _werr)
+            # 1. 保持 AlterEgo 原生桌面窗口当前位置稳定（严禁在用户交互时强制位移或缩放导致窗口跳动）
+
 
             # 2. 调整 Edge 浏览器窗口边界
             bw = getattr(getattr(self, "registry", None), "browser_worker", None)
@@ -1936,9 +2391,14 @@ class AgentServer:
 
         @app.route("/api/takeover/<tid>/focus", method=["GET", "POST"])
         def takeover_focus(tid):
-            token = request.query.get("token") or request.headers.get("X-AlterEgo-Token") or ""
+            token = (
+                request.query.get("token")
+                or request.headers.get("X-AlterEgo-Token")
+                or (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+                or ""
+            )
             import secrets
-            if self.api_token and token and not secrets.compare_digest(token, self.api_token):
+            if self.api_token and (not token or not secrets.compare_digest(token, self.api_token)):
                 response.status = 401
                 return {"error": "unauthorized"}
 
@@ -1971,6 +2431,12 @@ class AgentServer:
             )
             return {"task_id": tid, "status": req.status}
 
+        ALLOWED_UPLOAD_EXTS = frozenset({
+            ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico",
+            ".txt", ".md", ".json", ".csv", ".tsv", ".pdf",
+            ".docx", ".xlsx", ".pptx", ".log", ".yaml", ".yml",
+        })
+
         # 2.6 上传接口
         @app.route("/api/uploads", method="POST")
         def upload_file():
@@ -1978,11 +2444,17 @@ class AgentServer:
             if not upload:
                 response.status = 400
                 return {"error": "no_file"}
+            raw_ext = Path(upload.filename).suffix.lower()
+            if not raw_ext or raw_ext not in ALLOWED_UPLOAD_EXTS:
+                response.status = 400
+                return {
+                    "error": "disallowed_file_type",
+                    "message": f"不支持的文件扩展名: {raw_ext or '(无扩展名)'}。出于安全考量，禁止上传 HTML/SVG/脚本等风险格式。",
+                }
             uploads_dir = self.data_dir / "uploads"
             uploads_dir.mkdir(parents=True, exist_ok=True)
             uid = f"up_{uuid.uuid4().hex[:10]}"
-            ext = Path(upload.filename).suffix or ".bin"
-            fname = f"{uid}{ext}"
+            fname = f"{uid}{raw_ext}"
             save_path = uploads_dir / fname
             upload.save(str(save_path), overwrite=True)
             return {
@@ -2041,8 +2513,10 @@ class AgentServer:
                 final_base_url = test_base_url or getattr(self.llm, "base_url", "")
                 final_key = test_api_key or _resolve_model_key({"id": final_model, "base_url": final_base_url})
                 if not final_key:
-                    response.status = 400
-                    return {"status": "error", "message": f"模型 {final_model} 尚未配置 API Key，请先输入密钥"}
+                    return {
+                        "status": "error",
+                        "message": f"模型 [{final_model}] 尚未配置专属 API Key，请在下方「API Key 访问密钥」输入框中填入您的密钥后，再点击连通性测试或保存"
+                    }
                 from agent.llm import LLMClient
                 target_client = LLMClient(
                     base_url=final_base_url,
@@ -2055,8 +2529,16 @@ class AgentServer:
                 res = target_client.chat([Message(role="user", content="连通性测试，请回复OK")])
                 return {"status": "ok", "reply": res.content}
             except Exception as e:
-                response.status = 500
-                return {"status": "error", "message": str(e)}
+                err_str = str(e)
+                if "401" in err_str or "Invalid token" in err_str or "AuthenticationError" in err_str or "Unauthorized" in err_str:
+                    msg = f"API Key 认证失败 (401 Invalid Token / 密钥无效或未授权)。请检查在下方填入的 API Key 是否为该模型所属厂商颁发的有效密钥。"
+                elif "404" in err_str or "Not Found" in err_str:
+                    msg = f"API 端点路径不存在 (404 Not Found)。请检查 API Base URL 是否为 OpenAI 兼容的 /v1 路径（例如 https://apihub.agnes-ai.com/v1）。"
+                elif "ConnectError" in err_str or "Failed to establish" in err_str or "timeout" in err_str.lower():
+                    msg = f"无法连接到端点服务器（网络超时或拒绝连接）。请检查 Base URL 地址及本地网络。"
+                else:
+                    msg = f"模型调用失败: {err_str}"
+                return {"status": "error", "message": msg}
 
         @app.route("/api/settings/vault_key", method="POST")
         def set_vault_key():

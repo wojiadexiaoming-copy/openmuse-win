@@ -11,6 +11,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+_B64_CACHE: dict[str, str] = {}
+
+def _cached_b64encode(data: bytes) -> str:
+    """PERF-01: 缓存图片的 Base64 编码结果，同图二次编码命中缓存 (<1ms)。"""
+    if not data:
+        return ""
+    import hashlib, base64
+    if len(data) < 4096:
+        h = hashlib.md5(data).hexdigest()
+    else:
+        h = hashlib.md5(data[:2048] + data[-2048:] + str(len(data)).encode()).hexdigest()
+    if h in _B64_CACHE:
+        return _B64_CACHE[h]
+    encoded = base64.b64encode(data).decode("ascii")
+    if len(_B64_CACHE) > 500:
+        _B64_CACHE.clear()
+    _B64_CACHE[h] = encoded
+    return encoded
+
+
 @dataclass
 class ImagePart:
     """截图/图片附件（spec §24）。支持 bytes 或 base64，最长边 1568px 预处理。"""
@@ -25,8 +45,7 @@ class ImagePart:
         elif self.mime_type and not self.mime:
             self.mime = self.mime_type
         if self.data and not self.data_base64:
-            import base64
-            self.data_base64 = base64.b64encode(self.data).decode("ascii")
+            self.data_base64 = _cached_b64encode(self.data)
         elif self.data_base64 and not self.data:
             import base64
             try:
@@ -51,11 +70,11 @@ class ImagePart:
             buf = io.BytesIO()
             img.convert("RGB").save(buf, "JPEG", quality=quality)
             data = buf.getvalue()
-            b64 = base64.b64encode(data).decode("ascii")
+            b64 = _cached_b64encode(data)
             return cls(data=data, data_base64=b64, mime="image/jpeg", mime_type="image/jpeg")
         except Exception:
             import base64
-            b64 = base64.b64encode(png_or_jpeg_bytes).decode("ascii")
+            b64 = _cached_b64encode(png_or_jpeg_bytes)
             return cls(data=png_or_jpeg_bytes, data_base64=b64, mime="image/jpeg", mime_type="image/jpeg")
 
     @classmethod

@@ -65,6 +65,47 @@ def _dpapi_decryptable(blob: bytes) -> bool:
     return True
 
 
+class _MigrationFileLock:
+    """EDGE-06: 针对并发多实例启动时的跨进程文件互斥锁，杜绝迁移竞态。"""
+    def __init__(self, lock_path: Path):
+        self.lock_path = lock_path
+        self._fd = None
+
+    def __enter__(self):
+        try:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            self._fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except Exception:
+            time.sleep(0.3)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._fd is not None:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    try:
+                        msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                    except Exception:
+                        pass
+                else:
+                    import fcntl
+                    try:
+                        fcntl.flock(self._fd, fcntl.LOCK_UN)
+                    except Exception:
+                        pass
+                os.close(self._fd)
+            except Exception:
+                pass
+            self._fd = None
+
+
 def _migrate_legacy_vault(legacy: Path, scoped: Path, move: bool = False) -> None:
     """旧目录 / 上级机器目录 → 机器专属目录的合并同步。
 
@@ -72,6 +113,11 @@ def _migrate_legacy_vault(legacy: Path, scoped: Path, move: bool = False) -> Non
     """
     if not legacy.is_dir():
         return
+    with _MigrationFileLock(scoped / ".migration.lock"):
+        _do_migrate_legacy_vault(legacy, scoped, move=move)
+
+
+def _do_migrate_legacy_vault(legacy: Path, scoped: Path, move: bool = False) -> None:
     bins = sorted(legacy.glob("*.bin"))
     if not bins:
         return

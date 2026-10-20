@@ -276,9 +276,21 @@ class ApprovalManager:
     def classify(self, tool: str, args: dict) -> str:
         return classify_tool_risk(tool, args)
 
+    @staticmethod
+    def _canonicalize_obj(obj):
+        """EDGE-05: 递归规范化对象键序与集合，确保任意深度嵌套字典在不同键序下哈希绝对一致。"""
+        if isinstance(obj, dict):
+            return {k: ApprovalManager._canonicalize_obj(v) for k, v in sorted(obj.items(), key=lambda item: str(item[0]))}
+        elif isinstance(obj, (list, tuple)):
+            return [ApprovalManager._canonicalize_obj(x) for x in obj]
+        elif isinstance(obj, set):
+            return sorted([ApprovalManager._canonicalize_obj(x) for x in obj], key=lambda x: str(x))
+        return obj
+
     def _wkey(self, tool: str, args: dict) -> str:
+        clean = self._canonicalize_obj(args) if isinstance(args, (dict, list, tuple, set)) else args
         sig = hashlib.sha256(
-            json.dumps(args, sort_keys=True, ensure_ascii=False).encode()
+            json.dumps(clean, sort_keys=True, ensure_ascii=False, default=str).encode()
         ).hexdigest()[:16]
         return f"{tool}:{sig}"
 

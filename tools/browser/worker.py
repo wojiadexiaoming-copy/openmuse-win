@@ -1791,7 +1791,9 @@ class BrowserWorker:
                     try:
                         nav_timeout = int(args.get("timeout") or 15000)
                         self._raw_page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
-                    except Exception:
+                    except Exception as e:
+                        if "err_too_many_redirects" in str(e).lower() or "too many redirects" in str(e).lower():
+                            return "[重定向次数超限] 目标页面发生多次重定向循环，已终止导航"
                         pass
                     existing_tab["last_used"] = time.time()
                     title = ""
@@ -1837,6 +1839,8 @@ class BrowserWorker:
                     return (f"[导航就绪失败] 页面已打开，但关键元素 {wait_for} 在 10 秒内未出现: {e}。"
                             "请 browser_snapshot 重新观察页面状态。")
         except Exception as e:  # noqa: BLE001
+            if "err_too_many_redirects" in str(e).lower() or "too many redirects" in str(e).lower():
+                return "[重定向次数超限] 目标页面发生多次重定向循环，已主动终止导航"
             if "captcha" in str(e).lower() or "verify you are human" in str(e).lower():
                 self.circuit.record("captcha")
                 return f"[导航失败] {e}"
