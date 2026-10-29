@@ -27,6 +27,39 @@ OpenMuse-Win 在架构底层构建了**「浏览器不可变 ref 句柄 + Set-of
 
 ---
 
+## 🎬 真实评测 | Real-World Evaluation
+
+2026-10-29 实拍，三段任务连续完成，均含步骤字幕。
+Recorded on Oct 29, 2026: three tasks completed in one continuous session, with step subtitles burned in.
+
+以下实拍即本项目运行画面（论文名 AlterEgo）。
+Footage below shows this project in action (paper name: AlterEgo).
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <video controls width="100%" src="https://alterego.inodetree.com/AlterEgo-demo-1-trip.mp4"></video><br/>
+      <b>1. 规划北京到美国 7 天旅行 | 7-Day Beijing–US Trip Planning</b>（1:55）<br/>
+      查机票、比价、选日期 · Flights, prices, dates<br/>
+      <a href="https://alterego.inodetree.com/AlterEgo-demo-1-trip.mp4">直接看 | Direct link</a>
+    </td>
+    <td align="center" width="33%">
+      <video controls width="100%" src="https://alterego.inodetree.com/AlterEgo-demo-2-poster.mp4"></video><br/>
+      <b>2. 豆包生成 2027 元旦海报 | 2027 New Year Poster via Doubao</b>（0:45）<br/>
+      红金配色、立体数字 · Red-gold, 3D numerals<br/>
+      <a href="https://alterego.inodetree.com/AlterEgo-demo-2-poster.mp4">直接看 | Direct link</a>
+    </td>
+    <td align="center" width="33%">
+      <video controls width="100%" src="https://alterego.inodetree.com/AlterEgo-demo-3-desktop.mp4"></video><br/>
+      <b>3. 桌面文件夹与 Markdown 文档 | Desktop Folder &amp; Markdown File</b>（1:39）<br/>
+      新建文件夹、写文档、L2 审批 · Folder, doc, L2 approval<br/>
+      <a href="https://alterego.inodetree.com/AlterEgo-demo-3-desktop.mp4">直接看 | Direct link</a>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## 📑 学术论文与技术报告 (Paper & Citation)
 
 本项目实证研究与系统架构论文已正式在 **Zenodo** 公开发布：
@@ -143,6 +176,109 @@ pytest tests/test_privacy_failover_tradeoff.py -v
 | **严格数据主权模式**<br>*(Strict Sovereignty)* | 角色仅绑定单一私有模型，或全局设置 `fallback.enabled: false` | ⭐️⭐️⭐️⭐️⭐️<br>(100% 封闭) | ⭐️⭐️<br>(遇限流立即停机) | 核心商业机密处理、代码安全审计、私有合规端点。 |
 | **按角色分级隔离模式**<br>*(Tiered Role Isolation)*<br>**【官方推荐】** | 敏感角色（Subagent / Code）单靶点封闭；日常交互角色（Main / Planner）配置多商兜底 | ⭐️⭐️⭐️⭐️<br>(关键数据零外溢) | ⭐️⭐️⭐️⭐️<br>(日常任务顺畅) | 兼顾机密资产保护与常规开发办公自动化的生产级架构。 |
 | **高弹性零成本模式**<br>*(Elastic Zero-Cost)* | 角色配置多家免费/低成本 Provider 链条（如 Nvidia → ModelScope → 智谱） | ⭐️⭐️⭐️<br>(受各服务商条款约束) | ⭐️⭐️⭐️⭐️⭐️<br>(秒级自愈，>99% 完成率) | 公开网页数据检索、批量自动化、常规办公自动化。 |
+
+---
+
+## 🗺️ 架构详图 | Architecture in Detail
+
+公开版全景架构图的细化补充：任务如何一步步执行、风险如何分级放行、部署拓扑长什么样。
+A visual supplement to the panorama above: how tasks execute step by step, how risks are gated, and what deployment looks like.
+
+### 任务执行流水线 | Task Execution Pipeline
+
+```mermaid
+flowchart LR
+    p_task["用户任务<br/>User task"]
+    p_plan["Planner 拆解<br/>Planner breaks down"]
+    p_react["ReAct 循环<br/>Think → Act → Observe<br/>循环直到完成"]
+    p_gate["审批闸门<br/>Approval gate"]
+    p_exec["工具执行<br/>Tool execution<br/>浏览器 / 桌面"]
+    p_verify["验收回传<br/>Verify & return"]
+    p_sse["SSE 推送<br/>SSE live updates"]
+    p_fail["模型失败 → Failover 下一家免费模型<br/>Model failure → failover to next free model"]
+    p_tier["L1 自动 · L2 卡片确认 · L3 强约束<br/>L1 auto · L2 card confirm · L3 strict"]
+    p_take["用户接管 → 人工完成 → 回锁继续<br/>Takeover → human finishes → resume"]
+    p_audit["全程留痕：Tracing 链路追踪 · Token 用量统计 · 验收器核验<br/>Full audit trail: tracing, token usage, verifier checks"]
+    p_task --> p_plan --> p_react --> p_gate --> p_exec --> p_verify --> p_sse
+    p_react -.-> p_fail
+    p_gate -.-> p_tier
+    p_exec -.-> p_take
+    p_sse -.-> p_audit
+    classDef blue fill:#eff6ff,stroke:#2563eb
+    classDef violet fill:#f5f3ff,stroke:#7c3aed
+    classDef teal fill:#f0fdfa,stroke:#0d9488
+    classDef amber fill:#fffbeb,stroke:#d97706
+    class p_task,p_sse blue
+    class p_plan,p_react violet
+    class p_exec,p_verify teal
+    class p_gate,p_tier amber
+    class p_fail,p_take,p_audit amber
+```
+
+一句话任务进来后，Planner 拆解、ReAct 循环执行、审批闸门按风险定级放行、工具执行、验收回传，全程经 SSE 实时推送。
+A one-sentence task goes through Planner breakdown, ReAct execution, risk-tiered approval gating, tool execution, and verified return, streaming over SSE all the way.
+
+### 安全与审批架构 | Security & Approval
+
+```mermaid
+flowchart TB
+    s_risk["风险分级<br/>Risk classification<br/>每次工具调用先定级"]
+    s_l1["L1 · 自动放行<br/>Auto · low risk<br/>只读查询 / 状态读取 / 无副作用操作"]
+    s_l2["L2 · 确认卡<br/>Approval card · medium risk<br/>文件写入 / 浏览器操作 / 桌面卡片 / 微信回执 1 / 同意"]
+    s_l3["L3 · 强约束<br/>Strict · high risk<br/>越界操作 / 破坏性操作 / 必须明确批准"]
+    s_base["防护底座 Defense in depth<br/>凭据保险箱 · 目录隔离 · 单实例锁<br/>热备份 + 清理 · 日志脱敏 · Tracing 审计"]
+    s_risk --> s_l1
+    s_risk --> s_l2
+    s_risk --> s_l3
+    s_l1 --> s_base
+    s_l2 --> s_base
+    s_l3 --> s_base
+    classDef green fill:#ecfdf5,stroke:#059669
+    classDef amber fill:#fffbeb,stroke:#d97706
+    classDef rose fill:#fff1f2,stroke:#e11d48
+    classDef slate fill:#f8fafc,stroke:#334155
+    class s_l1 green
+    class s_l2 amber
+    class s_l3 rose
+    class s_risk,s_base slate
+```
+
+每一次工具调用先按风险定级：L1 自动放行、L2 卡片确认、L3 强约束；底座是凭据保险箱、目录隔离、单实例锁、热备份与日志脱敏。
+Every tool call is risk-classified first: L1 auto, L2 card confirmation, L3 strict; the base is the credential vault, directory isolation, single-instance lock, backups, and log scrubbing.
+
+### 部署拓扑 | Deployment
+
+```mermaid
+flowchart LR
+    subgraph PC["用户 Windows 电脑 User's Windows PC"]
+        w_env["ensure_env.bat → venv 依赖环境<br/>ensure_env.bat → venv dependencies"]
+        w_cfg["config.yaml + 环境变量 ALTEREGO_LLM_API_KEY<br/>config.yaml + ALTEREGO_LLM_API_KEY env var"]
+        w_run["run_ui.bat 桌面 UI / run_cli.bat 终端<br/>run_ui.bat desktop UI · run_cli.bat CLI"]
+        w_data["本地数据：data/ · SQLite · Vault<br/>Local data: data/ · SQLite · Vault"]
+        w_env --> w_cfg --> w_run --> w_data
+    end
+    subgraph API["云 LLM API Cloud LLM APIs<br/>官方免费 · OpenAI 兼容"]
+        w_nv["NVIDIA"]
+        w_ms["ModelScope"]
+        w_zp["Zhipu"]
+        w_ag["Agnes"]
+    end
+    w_wx["微信通道 WeChat channel<br/>远程审批与双向通知<br/>Remote approval & two-way notifications"]
+    w_run -- "模型推理 (HTTPS) · 零成本" --> w_nv
+    w_run --> w_ms
+    w_run --> w_zp
+    w_run --> w_ag
+    w_run -- "状态通知 / 审批回执" --> w_wx
+    classDef blue fill:#eff6ff,stroke:#2563eb
+    classDef amber fill:#fffbeb,stroke:#d97706
+    classDef teal fill:#f0fdfa,stroke:#0d9488
+    class w_env,w_cfg,w_run,w_data blue
+    class w_nv,w_ms,w_zp,w_ag amber
+    class w_wx teal
+```
+
+部署就是一台 Windows 电脑：ensure_env.bat 建环境、config.yaml + 环境变量配 key、run_ui.bat / run_cli.bat 启动；云端只出模型推理，微信通道只做远程审批与通知。
+Deployment is one Windows PC: ensure_env.bat sets up the environment, config.yaml plus an env var holds the key, run_ui.bat / run_cli.bat start it; the cloud only does inference, WeChat only does remote approval and notifications.
 
 ---
 
