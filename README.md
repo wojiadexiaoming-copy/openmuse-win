@@ -368,6 +368,28 @@ openmuse-win/
 
 ---
 
+---
+
+## 📌 版本说明：v1.0.0（赛前已有代码）
+
+本仓库当前版本 **v1.0.0**（Tag `v1.0.0`，commit `f23fca2`，2026-10-18）是 **2026-11-13 14:00 开赛之前已有的代码**。比赛期间新增的代码将以新的版本号与提交记录区分（以 commit 时间为准）。
+
+**v1.0.0 包含的内容（共 201 个文件）：**
+
+- **自研编排核心**（`agent/`）：0 依赖轻量 ReAct 状态机、多角色路由（Main 主控 / Planner 规划 / Subagent 子任务 / Worker 后台分析）、上下文压缩、记忆管理与失败记忆；
+- **浏览器控制**（`tools/browser/`）：不可变活体句柄 `[ref=aeN]`、Set-of-Mark 语义框选、浮层自适应隔离、拟人闭环输入核验、反爬拟人模拟；
+- **Windows 桌面控制**（`tools/desktop/`）：UIA Pattern 四层交互阶梯、物理光标让出保护、破坏性操作二次确认；
+- **安全与金库**（`vault/`）：Windows DPAPI 硬件绑定加密、L1~L3 三级安全审批、全链路日志脱敏；
+- **Web 协同控制台**（`ui/`）：Bottle + SSE 实时日志与 Token 遥测、多模型动态管理；
+- **多通道**（`channels/`）：微信远程审批与双向通知；
+- **站点适配**（`adapters/sites/`）：站点级 quirks 配置（如 OpenRouter）；
+- **测试**（`tests/`）：87 个测试文件（pytest + 前端 JS 测试），含隐私保护 failover 基准测试；
+- **论文**：AlterEgo: Towards the Zero-Cost Personal Agent，Zenodo DOI [10.5281/zenodo.23446166](https://doi.org/10.5281/zenodo.23446166)；
+- **第三方依赖**（`requirements.txt`）：openai、pyyaml、httpx、pytest、playwright、pillow、apscheduler、sqlalchemy、qrcode、pywebview、pyautogui、pywinauto（edge-tts 为可选）。
+
+
+---
+
 ## 📄 开源许可证
 
 本项目基于 **[GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE)** 协议开源。
