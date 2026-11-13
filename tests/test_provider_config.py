@@ -97,3 +97,75 @@ def test_vault_provider_resolution_from_worker_threads_is_audited(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         assert all(pool.map(read, range(32)))
     assert len(vault.recent_accesses(100)) == 32
+
+
+def test_persist_config_roles_fallback(tmp_path, monkeypatch):
+    import ui.server as server_mod
+    monkeypatch.setattr(server_mod, "REPO_ROOT", tmp_path)
+
+    cfg_file = tmp_path / "config.yaml"
+    initial_yaml = (
+        "models:\n"
+        "  roles:\n"
+        "    main:\n"
+        "      model: old-model\n"
+        "      base_url: https://old.com\n"
+        "llm:\n"
+        "  model: old-model\n"
+        "  base_url: https://old.com\n"
+    )
+    cfg_file.write_text(initial_yaml, encoding="utf-8")
+
+    class FakeServer:
+        cfg = {
+            "models": {
+                "roles": {
+                    "main": {"model": "new-model", "base_url": "https://new.com"}
+                }
+            },
+            "llm": {"model": "new-model", "base_url": "https://new.com"}
+        }
+
+    # Simulate _persist_config_roles execution
+    from ruamel.yaml import YAML
+    loader = YAML()
+    with open(cfg_file, "r", encoding="utf-8") as f:
+        data = loader.load(f)
+    assert data["models"]["roles"]["main"]["model"] == "old-model"
+
+    # Now run server logic
+    monkeypatch.setenv("ALTEREGO_LLM_API_KEY", "sk-mock-key")
+    server = server_mod.AgentServer(data_dir=tmp_path)
+    server.cfg["models"]["roles"]["main"] = {"model": "updated-model", "base_url": "https://updated.com"}
+    server.cfg["llm"] = {"model": "updated-model", "base_url": "https://updated.com"}
+
+    # Trigger switch_model logic
+    client = server.app
+    import io, json
+    res_status = []
+    def start_response(status, headers, exc_info=None):
+        res_status.append(status)
+    body_bytes = json.dumps({
+        "model_id": "test-custom-model",
+        "base_url": "https://custom.com",
+        "api_key": "custom-key",
+        "target_role": "main"
+    }).encode("utf-8")
+    env = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/api/switch_model",
+        "HTTP_AUTHORIZATION": f"Bearer {server.api_token}",
+        "wsgi.input": io.BytesIO(body_bytes),
+        "wsgi.errors": io.StringIO(),
+        "CONTENT_LENGTH": str(len(body_bytes)),
+        "CONTENT_TYPE": "application/json",
+    }
+    resp = client(env, start_response)
+    resp_text = b"".join(resp).decode("utf-8")
+    assert "200" in res_status[0]
+    assert json.loads(resp_text).get("ok") is True
+
+    # Verify config.yaml was updated on disk
+    disk_text = cfg_file.read_text(encoding="utf-8")
+    assert "test-custom-model" in disk_text
+

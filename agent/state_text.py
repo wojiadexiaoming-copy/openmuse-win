@@ -18,37 +18,69 @@ ACTION_CN_MAP: dict[str, str] = {
     "desktop_open": "打开桌面应用",
     "desktop_list_windows": "查找桌面窗口",
     "desktop_click": "点击桌面目标",
+    "desktop_hover": "悬停桌面目标元素",
+    "desktop_drag": "拖拽桌面目标窗口",
     "desktop_type": "输入键盘文本",
     "desktop_hotkey": "按下系统快捷键",
     "desktop_screenshot": "截取全屏桌面",
     "desktop_snapshot": "观察桌面窗口状态",
     "desktop_inspect_focus": "验证输入焦点",
     "desktop_wait": "等待桌面响应",
+    "desktop_sleep": "等待桌面响应",
+    "wait": "等待桌面响应",
+    "sleep": "等待桌面响应",
     "desktop_press": "按下桌面按键",
     "desktop_scroll": "滚动目标窗口",
-    # 终端与文件
+    "desktop_probe_app": "探查桌面应用状态",
+    # 终端、搜索与文件
     "shell_exec": "执行系统命令",
+    "web_search": "搜索网络信息",
     "file_read": "读取文件内容",
     "file_write": "保存文件",
     "file_edit": "修改文件",
-    # 浏览器导航与标签页
+    # 浏览器导航、标签页与多上下文
     "browser_navigate": "打开目标网页",
     "browser_new_tab": "新建浏览器标签页",
     "browser_switch_tab": "切换网页标签页",
     "browser_close_tab": "关闭网页标签页",
+    "browser_context_new": "创建独立浏览器上下文",
+    "browser_context_switch": "切换浏览器上下文",
+    "browser_context_close": "关闭独立浏览器上下文",
+    "browser_context_list": "查看浏览器上下文列表",
+    "browser_context_cookies": "管理浏览器Cookie",
+    # 浏览器交互与诊断
     "browser_click": "点击网页按钮",
     "browser_click_at": "精准点击网页位置",
     "browser_probe_at": "探查页面元素",
+    "browser_hover": "悬停鼠标至网页元素",
     "browser_type": "填写网页表单",
+    "browser_fill_input": "精准填充网页表单",
+    "browser_fill_combo": "填写网页组合框/下拉搜索",
+    "browser_paste": "粘贴内容至网页",
+    "browser_press": "按下网页按键",
+    "browser_select": "选择下拉框选项",
+    "browser_upload": "上传文件至网页",
+    "browser_save_image": "提取保存网页图片",
     "browser_screenshot": "截取网页画面",
     "browser_snapshot": "分析页面元素结构",
     "browser_scroll": "滚动浏览网页",
     "browser_wait": "等待网页加载",
+    "browser_wait_for": "等待网页特定元素出现",
+    "browser_verify_code_countdown": "等待验证码倒计时",
     "browser_evaluate": "执行网页交互动作",
+    "browser_handler": "处理网页交互弹窗",
     "browser_find_text": "查找页面文字位置",
     "browser_inspect": "检查页面元素状态",
+    "browser_react_probe": "读取控件内部状态",
     "browser_console": "诊断网页控制台",
     "browser_network_log": "核验网络请求",
+    "browser_resource": "监控网页网络资源",
+    "browser_storage": "检查网页本地存储",
+    "browser_observe": "观察网页元素变动",
+    "browser_lock_input": "锁定网页输入状态",
+    "browser_unlock_input": "解锁网页输入状态",
+    "browser_record_start": "启动网页操作录制",
+    "browser_record_stop": "停止网页操作录制",
     "browser_request_takeover": "请求人工协同接管",
     # 状态与持久化
     "state_check": "核验任务执行进度",
@@ -58,17 +90,36 @@ ACTION_CN_MAP: dict[str, str] = {
     "cron_add": "创建定时任务",
     "cron_remove": "取消定时任务",
     "cron_list": "查看定时任务",
+    "schedule_once": "设置定时提醒",
     # 保险箱与记忆
     "vault_get": "安全读取保险箱密钥",
     "vault_set": "安全存储保险箱密钥",
     "memory_read": "读取知识记忆库",
     "memory_write": "沉淀关键经验至记忆库",
-    # 多模态
+    # 多模态与语音
     "image_generate": "生成图像素材",
     "video_generate": "生成视频素材",
+    "tts_synthesize": "合成语音播报音频",
     # 子 Agent
     "spawn_subagent": "分发协同子任务",
     "poll_subagent": "查看协同子任务进展",
+    "wait_subagent": "等待协同子任务结果",
+    "cancel_subagent": "终止协同子任务",
+    # 第三方连接与邮件
+    "connector_auth_link": "获取服务授权链接",
+    "gmail_list": "查询Gmail邮件列表",
+    "gmail_send": "发送Gmail邮件",
+    # 主动服务、工作流与产物
+    "proactivity_add": "暂存主动服务建议",
+    "proactivity_pending": "查看待办主动建议",
+    "workflow_start": "启动业务工作流",
+    "workflow_status": "查看工作流执行进度",
+    "workflow_complete_step": "上报工作流步骤完成",
+    "artifact_create": "创建交付产物",
+    "artifact_list": "查看交付产物列表",
+    # 备份与恢复
+    "backup_run": "执行全量数据备份",
+    "backup_verify": "校验数据备份完整性",
     # 人工接管
     "takeover_request": "请求人工协同接管",
     "ask_user": "向用户确认信息",
@@ -169,6 +220,8 @@ def tool_summary(tool: str, args: dict[str, Any] | None = None) -> str:
         return f"正在查找页面文字「{txt}」"
     elif tool == "browser_inspect":
         return "正在检查页面按钮可点击状态"
+    elif tool == "browser_react_probe":
+        return "正在读取控件内部状态与事件绑定"
     elif tool == "browser_console":
         return "正在核查网页控制台日志"
     elif tool == "browser_network_log":
@@ -200,9 +253,81 @@ def tool_summary(tool: str, args: dict[str, Any] | None = None) -> str:
         return f"正在派发协同子任务: {disp}"
     elif tool == "poll_subagent":
         return "正在查询协同子任务进展"
+    elif tool == "wait_subagent":
+        tid = args.get("task_id", "")
+        return f"正在等待协同子任务 {tid} 的结果" if tid else "正在等待协同子任务结果"
     elif tool == "takeover_request":
         reason = args.get("reason", "需要人工操作")
         return f"请求人工协同接管: {reason}"
+    elif tool == "web_search":
+        query = str(args.get("query", "")).strip()
+        disp = (query[:30] + "…") if len(query) > 30 else query
+        return f"正在搜索网络信息: {disp}" if disp else "正在搜索网络信息"
+    elif tool == "desktop_hover":
+        ref = args.get("ref") or args.get("control_ref")
+        return f"正在悬停鼠标至控件「{ref}」" if ref else "正在悬停鼠标至桌面目标"
+    elif tool == "desktop_drag":
+        return "正在拖拽屏幕目标"
+    elif tool == "desktop_probe_app":
+        app = args.get("window_title") or "桌面应用"
+        return f"正在探查应用「{app}」运行状态"
+    elif tool in ("desktop_wait", "desktop_sleep", "sleep", "wait"):
+        secs = args.get("seconds") or args.get("duration") or ""
+        return f"正在等待系统响应（{secs}秒）" if secs else "正在等待系统响应"
+    elif tool == "browser_hover":
+        sel = args.get("selector") or args.get("text") or "网页元素"
+        return f"正在悬停鼠标至页面「{sel}」"
+    elif tool == "browser_fill_input":
+        sel = args.get("selector") or "输入框"
+        return f"正在精准填写页面「{sel}」"
+    elif tool == "browser_press":
+        key = args.get("key", "按键")
+        return f"正在按下按键「{key}」"
+    elif tool == "browser_upload":
+        path = args.get("file_path") or args.get("path") or "本地文件"
+        return f"正在上传文件 {path}"
+    elif tool == "browser_select":
+        val = args.get("value") or args.get("label") or "选项"
+        return f"正在选择下拉选项「{val}」"
+    elif tool == "browser_wait_for":
+        sel = args.get("selector") or "目标元素"
+        return f"正在等待页面元素「{sel}」出现"
+    elif tool == "browser_save_image":
+        return "正在提取保存网页图片"
+    elif tool == "schedule_once":
+        secs = args.get("seconds", "")
+        brief = str(args.get("brief", "")).strip()
+        disp = (brief[:25] + "…") if len(brief) > 25 else brief
+        return f"正在设置定时提醒（{secs}秒后：{disp}）" if secs else "正在设置定时提醒"
+    elif tool == "tts_synthesize":
+        text = str(args.get("text", "")).strip()
+        disp = (text[:20] + "…") if len(text) > 20 else text
+        return f"正在合成语音: \"{disp}\"" if disp else "正在合成语音音频"
+    elif tool == "cancel_subagent":
+        tid = args.get("task_id", "")
+        return f"正在终止协同子任务 {tid}" if tid else "正在终止协同子任务"
+    elif tool == "gmail_list":
+        q = args.get("query", "")
+        return f"正在查询Gmail邮件（{q}）" if q else "正在查询Gmail邮件列表"
+    elif tool == "gmail_send":
+        to = args.get("to", "收件人")
+        return f"正在发送Gmail邮件至 {to}"
+    elif tool == "artifact_create":
+        title = args.get("title", "未命名产物")
+        return f"正在创建交付产物「{title}」"
+    elif tool == "artifact_list":
+        return "正在查看交付产物列表"
+    elif tool == "workflow_start":
+        wid = args.get("workflow_id", "工作流")
+        return f"正在启动工作流「{wid}」"
+    elif tool == "workflow_status":
+        return "正在查询工作流执行进度"
+    elif tool == "workflow_complete_step":
+        return "正在上报工作流步骤完成"
+    elif tool == "backup_run":
+        return "正在执行全量数据备份"
+    elif tool == "backup_verify":
+        return "正在校验数据备份完整性"
 
     return f"正在推进：{cn_name}"
 
@@ -230,8 +355,11 @@ def result_summary(result: str | Message, max_len: int = 60) -> str:
         if result.metadata.get("tool_cancelled") is True:
             return "本轮已安全暂停，该调用未执行"
         if control is not None:
-            return ("桌面四角停止保护已触发，等待用户恢复" if control["reason"] == "desktop_failsafe"
-                    else "工具无法自动重试，本轮已停止")
+            if control["reason"] == "desktop_failsafe":
+                return "桌面四角停止保护已触发，等待用户恢复"
+            if control["reason"] == "focus_contention":
+                return "检测到用户正在操作鼠标或键盘，已暂停，停止操作后可继续"
+            return "工具无法自动重试，本轮已停止"
         verification = result.metadata.get("desktop_verification")
         if isinstance(verification, dict) and verification.get("focus_verified") is False:
             return "目标输入焦点未验证，不能输入或提交"
@@ -268,6 +396,28 @@ def result_summary(result: str | Message, max_len: int = 60) -> str:
         return "标签页切换成功"
     if text.startswith("[已钉死]") or text.startswith("[钉死检查通过]"):
         return "关键数据核验锁定完成"
+    if text.startswith("[Gmail]"):
+        return "邮件操作处理完成"
+    if text.startswith("[推送"):
+        return "主动服务建议已处理"
+    if text.startswith("[Workflow"):
+        return "工作流状态更新完成"
+    if text.startswith("[产物"):
+        return "交付产物处理完成"
+    if text.startswith("[TTS]"):
+        return "语音合成处理完成"
+    if text.startswith("[定时"):
+        return "定时提醒设置完成"
+    if text.startswith("[备份"):
+        return "系统备份处理完成"
+    if text.startswith("[子 Agent"):
+        return "协同子任务状态已更新"
+    if text.startswith("[授权链接]"):
+        return "服务授权链接已生成"
+    if text.startswith("[当前桌面窗口列表]"):
+        return "桌面可见窗口扫描完毕"
+    if text.startswith("[桌面项目列表]"):
+        return "桌面项目扫描完毕"
     first_line = text.split("\n", 1)[0].strip()
     clean = (first_line
              .replace("[桌面截图]", "")

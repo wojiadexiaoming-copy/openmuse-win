@@ -23,10 +23,10 @@ class JobSpec:
 _FIRE_REGISTRY: dict[str, "Scheduler"] = {}
 
 
-def _fire_job(sched_id: str, job_id: str):
+def _fire_job(sched_id: str, job_id: str, brief: str = ""):
     sched = _FIRE_REGISTRY.get(sched_id)
     if sched is not None:
-        sched._fire(job_id)
+        sched._fire(job_id, brief)
 
 
 class Scheduler:
@@ -71,18 +71,25 @@ class Scheduler:
             raise ValueError(f"未知任务类型: {spec.kind}")
         self._specs[spec.job_id] = spec
         self._sched.add_job(_fire_job, trigger=trigger, id=spec.job_id,
-                            args=(self._sched_id, spec.job_id),
+                            args=(self._sched_id, spec.job_id, spec.brief),
                             coalesce=spec.coalesce,
                             replace_existing=True,
                             misfire_grace_time=3600)
 
-    def _fire(self, job_id: str):
+    def _fire(self, job_id: str, brief: str = ""):
         spec = self._specs.get(job_id)
-        if spec and self.on_fire:
-            try:
-                self.on_fire(job_id, spec.brief)
-            except Exception as e:  # noqa: BLE001 —— Job 出错必通知（§10.4）
-                self._notify(f"[定时任务出错] {job_id}: {e}", urgent=True)
+        task_brief = (spec.brief if spec else "") or brief
+        if not task_brief:
+            self._notify(f"[定时任务出错] {job_id}: 任务书丢失，无法执行", urgent=True)
+            return
+        if not self.on_fire:
+            self._notify(f"[定时任务出错] {job_id}: 未接执行入口，任务书未执行",
+                         urgent=True)
+            return
+        try:
+            self.on_fire(job_id, task_brief)
+        except Exception as e:  # noqa: BLE001 —— Job 出错必通知（§10.4）
+            self._notify(f"[定时任务出错] {job_id}: {e}", urgent=True)
 
     def _notify(self, text: str, urgent: bool = False):
         # [M3 完成] 接 Windows 通知（spec §31.4）/ UI 推送。

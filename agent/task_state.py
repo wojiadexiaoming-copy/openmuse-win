@@ -52,11 +52,21 @@ class TaskState:
         self._pins.clear()
 
 
+import contextvars
+
+_state_var: contextvars.ContextVar[TaskState | None] = contextvars.ContextVar("current_task_state", default=None)
 _state = TaskState()
 
 
 def current_task_state() -> TaskState:
+    st = _state_var.get()
+    if st is not None:
+        return st
     return _state
+
+
+def set_current_task_state(st: TaskState | None) -> contextvars.Token:
+    return _state_var.set(st)
 
 
 def _tool_pin(args: dict) -> str:
@@ -68,6 +78,11 @@ def _tool_pin(args: dict) -> str:
 def _tool_check(args: dict) -> str:
     ok, msg = current_task_state().check(args.get("key"), args.get("value"))
     return msg
+
+
+def _tool_clear(args: dict) -> str:
+    current_task_state().reset()
+    return "[已清理] 任务临时状态与关键钉死值已重置"
 
 
 def _schema(props, required):
@@ -86,7 +101,11 @@ TASK_STATE_TOOLS = [
             "source": {"type": "string", "default": "",
                        "description": "来源说明，如'邮箱页截图读回'"}},
             ["key", "value"]),
-        func=_tool_pin),
+        func=_tool_pin,
+        parallel_safe=False,
+        is_readonly=False,
+        cacheable=False,
+    ),
     ToolDefinition(
         name="state_check",
         description=("钉死检查（§39.1.2）。使用关键值前 assert：未钉死或与钉死值不一致"
@@ -95,5 +114,18 @@ TASK_STATE_TOOLS = [
             "key": {"type": "string", "description": "键名"},
             "value": {"type": "string", "description": "要使用的值"}},
             ["key", "value"]),
-        func=_tool_check),
+        func=_tool_check,
+        parallel_safe=True,
+        is_readonly=True,
+        cacheable=False,
+    ),
+    ToolDefinition(
+        name="state_clear",
+        description="清理任务临时状态（§39.1.2）。重置当前任务所有已钉死的数据与关键凭据。",
+        parameters=_schema({}, []),
+        func=_tool_clear,
+        parallel_safe=False,
+        is_readonly=False,
+        cacheable=False,
+    ),
 ]

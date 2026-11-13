@@ -31,7 +31,10 @@ FIXED_BASE_URL = "https://ilinkai.weixin.qq.com"
 
 # bot_token 有效期（秒）：72 小时。过期后需重新扫码授权。
 # 2026-10-16 用户实测确认：token 存 72 小时后报 AuthenticationError。
+# 2026-10-29：改为实例级可配置（weixin.token_ttl_hours），此处仅作默认值。
 WEIXIN_TOKEN_TTL_SEC = 72 * 3600
+# 临期提醒阈值：剩余不足 12 小时即在状态与日志中提示重新扫码。
+WEIXIN_TOKEN_WARN_SEC = 12 * 3600
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = str((2 << 16) | (4 << 8) | 10)  # 132106 (v2.4.10)
 BOT_TYPE = "3"
@@ -48,6 +51,15 @@ def _build_uin() -> str:
     return base64.b64encode(str(val).encode("utf-8")).decode("utf-8")
 
 
+def _hours_to_sec(value: Any) -> float | None:
+    """把 weixin.*_hours 配置转成秒；非法值返回 None，交给通道走默认值。"""
+    try:
+        hours = float(value)
+    except (TypeError, ValueError):
+        return None
+    return hours * 3600 if hours > 0 else None
+
+
 class WeixinClient:
     """封装腾讯 iLink Bot API 基础通信协议。"""
 
@@ -55,6 +67,51 @@ class WeixinClient:
         self.base_url = base_url.rstrip("/")
         # 发送互斥锁：避免多线程并发调用 send_message 抢占 session 导致腾讯服务端静默丢弃
         self._send_lock = threading.Lock()
+        # 最近一次发送/长轮询失败（供 get_status 透出，避免「绑定成功但通道异常」看不出来）
+        self.last_send_error = ""
+        self.last_poll_error = ""
+        self.last_error_source = ""
+        self.last_error_at = 0.0
+
+    def _note_error(self, kind: str, err: Exception | str) -> None:
+        msg = " ".join(str(err).split())[:200]
+        if kind == "send":
+            self.last_send_error = msg
+        else:
+            self.last_poll_error = msg
+        self.last_error_source = kind
+        self.last_error_at = time.time()
+
+    @staticmethod
+    def _parse_body(text: str, endpoint: str) -> dict[str, Any]:
+        """空串与 {} 都是成功响应；非 JSON 必须视为协议错误，不能伪装成功。"""
+        text = (text or "").strip()
+        if not text or text == "{}":
+            return {"ret": 0}
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{endpoint} 返回非 JSON 响应: {text[:120]!r}") from e
+        if not isinstance(data, dict):
+            raise ValueError(f"{endpoint} 返回类型异常: {type(data).__name__}")
+        return data
+
+    def _post(
+        self,
+        endpoint: str,
+        body: dict[str, Any],
+        token: str,
+        timeout_sec: float,
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        """发送与接收使用同一份字节串，Content-Length 与实发字节严格一致。"""
+        host = (base_url or self.base_url).rstrip("/")
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers = self._build_headers(token=token, content_length=len(raw))
+        with httpx.Client(timeout=timeout_sec) as client:
+            resp = client.post(f"{host}/ilink/bot/{endpoint}", content=raw, headers=headers)
+            resp.raise_for_status()
+            return self._parse_body(resp.text, endpoint)
 
     def _build_headers(self, token: str | None = None, content_length: int | None = None) -> dict[str, str]:
         headers = {
@@ -124,21 +181,19 @@ class WeixinClient:
         timeout_sec: float = 35.0,
     ) -> dict[str, Any]:
         """长轮询同步微信用户消息。"""
-        host = (base_url or self.base_url).rstrip("/")
-        url = f"{host}/ilink/bot/getupdates"
         body = {
             "get_updates_buf": get_updates_buf,
             "base_info": self._build_base_info(),
         }
-        raw_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        headers = self._build_headers(token=token, content_length=len(raw_body))
         try:
-            with httpx.Client(timeout=timeout_sec) as client:
-                resp = client.post(url, json=body, headers=headers)
-                resp.raise_for_status()
-                return resp.json()
+            data = self._post("getupdates", body, token, timeout_sec, base_url)
         except (httpx.TimeoutException, httpx.ReadTimeout):
             return {"ret": 0, "msgs": [], "get_updates_buf": get_updates_buf}
+        except Exception as e:
+            self._note_error("poll", e)
+            raise
+        self.last_poll_error = ""
+        return data
 
     def send_message(
         self,
@@ -152,8 +207,6 @@ class WeixinClient:
     ) -> dict[str, Any]:
         """向微信用户推送回复文本；timeout_sec 限制每个网络 I/O 阶段。"""
         import uuid
-        host = (base_url or self.base_url).rstrip("/")
-        url = f"{host}/ilink/bot/sendmessage"
         client_id = f"alterego:{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
         msg_payload: dict[str, Any] = {
             "from_user_id": "",
@@ -174,17 +227,19 @@ class WeixinClient:
             "msg": msg_payload,
             "base_info": self._build_base_info(),
         }
-        raw_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        headers = self._build_headers(token=token, content_length=len(raw_body))
 
-        with self._send_lock:
-            with httpx.Client(timeout=timeout_sec) as client:
-                resp = client.post(url, json=body, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-                if data.get("ret") and data.get("ret") != 0:
-                    logger.error(f"send_message 异常: {data}")
-                return data
+        try:
+            with self._send_lock:
+                data = self._post("sendmessage", body, token, timeout_sec, base_url)
+        except Exception as e:
+            self._note_error("send", e)
+            raise
+        if data.get("ret") and data.get("ret") != 0:
+            logger.error(f"send_message 异常: {data}")
+            self._note_error("send", f"ret={data.get('ret')} {data.get('errmsg', '')}")
+            return data
+        self.last_send_error = ""
+        return data
 
 
 class WeixinChannel:
@@ -200,11 +255,21 @@ class WeixinChannel:
         tracer: Any = None,
         vault: Any = None,
         turn_lock: Any = None,
+        token_ttl_sec: float | None = None,
+        token_warn_sec: float | None = None,
     ):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.creds_file = self.data_dir / "weixin_credentials.json"
         self.qr_img_path = self.data_dir / "weixin_qr.png"
+        self.token_ttl_sec = self._coerce_seconds(token_ttl_sec, WEIXIN_TOKEN_TTL_SEC, "token_ttl_sec")
+        self.token_warn_sec = self._coerce_seconds(token_warn_sec, WEIXIN_TOKEN_WARN_SEC, "token_warn_sec")
+        if self.token_warn_sec > self.token_ttl_sec:
+            self.token_warn_sec = self.token_ttl_sec
+        self.credential_source = ""
+        self.last_save_error = ""
+        self._expired_logged_for: float | None = None
+        self._soon_logged_for: float | None = None
 
         self.orch = orch
         self.turn_lock = turn_lock if turn_lock is not None else (
@@ -224,15 +289,75 @@ class WeixinChannel:
 
         self.running = False
         self.active_qr: dict[str, Any] | None = None
-        self.weixin_session_id: str | None = None
+        import uuid
+        self.weixin_session_id: str = f"s-wx-{uuid.uuid4().hex[:8]}"
 
         self._login_thread: threading.Thread | None = None
         self._loop_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._active_approval_for_user: dict[str, str] = {}
 
         # 如果已有凭证，启动后台消息监听
         if self.is_connected():
             self.start_message_loop()
+
+    @staticmethod
+    def _coerce_seconds(value: Any, default: float, label: str) -> float:
+        """把配置里的秒数转成合法浮点；非法值回退默认并告警。"""
+        try:
+            if value is None or value == "":
+                return float(default)
+            sec = float(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "微信 %s 配置非法（%r），回退默认 %.1f 小时。",
+                label, value, float(default) / 3600,
+            )
+            return float(default)
+        if sec <= 0:
+            logger.warning(
+                "微信 %s 必须为正数（%r），回退默认 %.1f 小时。",
+                label, value, float(default) / 3600,
+            )
+            return float(default)
+        return sec
+
+    @staticmethod
+    def _resolved(path: Path) -> Path:
+        try:
+            return Path(path).resolve()
+        except Exception:
+            return Path(path).absolute()
+
+    def _legacy_credential_paths(self) -> list[Path]:
+        """历史版本的凭证落点（永不包含当前规范路径）。
+
+        2026-10-29 根因修复：旧实现把 data_dir.parent/"weixin" 当“冗余路径”清理，
+        生产布局 data_dir=<root>/data/weixin 时它恰好等于规范文件本身，
+        save_credentials 写完立刻自删，导致每次重启都掉线。
+        """
+        current = self._resolved(self.creds_file)
+        if self.data_dir.name == "weixin" and self.data_dir.parent.name == "data":
+            root = self.data_dir.parent.parent
+            candidates = [
+                root / "weixin" / "weixin_credentials.json",
+                root / "weixin_credentials.json",
+                self.data_dir.parent / "weixin_credentials.json",
+            ]
+        else:
+            candidates = [
+                self.data_dir.parent / "weixin_credentials.json",
+                self.data_dir.parent / "data" / "weixin" / "weixin_credentials.json",
+            ]
+        out: list[Path] = []
+        seen = {current}
+        for p in candidates:
+            rp = self._resolved(p)
+            if rp in seen:
+                continue
+            seen.add(rp)
+            out.append(p)
+        return out
 
     def is_connected(self) -> bool:
         """有 bot_token 且未过期才算已连接。
@@ -243,26 +368,34 @@ class WeixinChannel:
         """
         if not (self.credentials and self.credentials.get("bot_token")):
             return False
-        connected_at = self.credentials.get("connected_at", 0)
-        if time.time() - connected_at > WEIXIN_TOKEN_TTL_SEC:
-            logger.warning(
-                "微信 bot_token 已过期（超过 72 小时），需要重新扫码授权。")
+        connected_at = float(self.credentials.get("connected_at") or 0)
+        remaining = max(0.0, connected_at + self.token_ttl_sec - time.time())
+        if time.time() - connected_at > self.token_ttl_sec:
+            if self._expired_logged_for != connected_at:
+                self._expired_logged_for = connected_at
+                logger.warning(
+                    "微信 bot_token 已过期（超过 %.0f 小时），需要重新扫码授权。",
+                    self.token_ttl_sec / 3600,
+                )
             return False
+        if (self.token_warn_sec > 0 and remaining <= self.token_warn_sec
+                and self._soon_logged_for != connected_at):
+            self._soon_logged_for = connected_at
+            logger.warning(
+                "微信 bot_token 剩余约 %.1f 小时，请尽快重新扫码授权。",
+                remaining / 3600,
+            )
         return True
 
     def is_token_expired(self) -> bool:
-        """token 是否已过期（有 token 但超 72 小时）。"""
+        """token 是否已过期（有 token 但超过有效期限）。"""
         if not (self.credentials and self.credentials.get("bot_token")):
             return False
-        connected_at = self.credentials.get("connected_at", 0)
-        return time.time() - connected_at > WEIXIN_TOKEN_TTL_SEC
+        connected_at = float(self.credentials.get("connected_at") or 0)
+        return time.time() - connected_at > self.token_ttl_sec
 
     def load_credentials(self) -> dict[str, Any] | None:
-        candidates = [
-            self.creds_file,
-            self.data_dir.parent / "weixin" / "weixin_credentials.json",
-            self.data_dir.parent / "data" / "weixin" / "weixin_credentials.json",
-        ]
+        candidates = [self.creds_file, *self._legacy_credential_paths()]
         for p in candidates:
             if p.exists():
                 try:
@@ -280,12 +413,30 @@ class WeixinChannel:
                                 self.context_tokens.update(data["context_tokens"])
                             if data.get("get_updates_buf"):
                                 self.get_updates_buf = str(data["get_updates_buf"])
+                            self.credential_source = str(p)
+                            if self._resolved(p) != self._resolved(self.creds_file):
+                                logger.info("已从历史路径恢复微信凭证：%s", p)
                             return data
                 except Exception as e:
                     logger.warning(f"读取微信凭证失败 ({p}): {e}")
         return None
 
-    def save_credentials(self, creds: dict[str, Any]):
+    def _verify_saved_credentials(self, expected: dict[str, Any]) -> bool:
+        """回读校验：文件存在、可解析且 bot_token 与内存一致。"""
+        try:
+            with open(self.creds_file, "r", encoding="utf-8") as f:
+                on_disk = json.load(f)
+        except Exception as e:
+            self.last_save_error = f"回读失败: {e}"[:200]
+            logger.error(f"微信凭证回读失败 ({self.creds_file}): {e}")
+            return False
+        if not isinstance(on_disk, dict) or on_disk.get("bot_token") != expected.get("bot_token"):
+            self.last_save_error = "回读校验不一致: bot_token 缺失或不同"
+            logger.error(f"微信凭证回读校验失败 ({self.creds_file})：落盘内容与内存不一致。")
+            return False
+        return True
+
+    def save_credentials(self, creds: dict[str, Any]) -> bool:
         # 补时间戳：没有 connected_at 的旧格式凭证按当前时间算，
         # 避免 is_connected() 误判为过期。
         if "connected_at" not in creds:
@@ -301,44 +452,91 @@ class WeixinChannel:
             self.context_tokens.update(creds["context_tokens"])
 
         self.credentials = creds
-        targets = [
-            self.creds_file,
-            self.data_dir.parent / "data" / "weixin" / "weixin_credentials.json",
-            self.data_dir.parent / "weixin" / "weixin_credentials.json",
-        ]
-        for p in targets:
+        # 统一保存至单处（self.creds_file），原子写入 + 回读校验
+        try:
+            self.creds_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.creds_file.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(creds, f, ensure_ascii=False, indent=2)
+            tmp.replace(self.creds_file)
+        except Exception as e:
+            self.last_save_error = f"写入失败: {e}"[:200]
+            logger.error(f"保存微信凭证失败 ({self.creds_file}): {e}")
+            return False
+
+        if not self._verify_saved_credentials(creds):
+            # 落盘不可信时保留历史文件，避免把最后的可恢复凭证一起清掉
+            return False
+        self.last_save_error = ""
+        self.credential_source = str(self.creds_file)
+
+        # 仅在规范文件确认落盘后，再清理历史冗余路径
+        for lp in self._legacy_credential_paths():
             try:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                # 原子写入：写入临时文件后 replace，避免进程中断导致 json 损坏
-                tmp = p.with_suffix(".tmp")
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(creds, f, ensure_ascii=False, indent=2)
-                tmp.replace(p)
-            except Exception as e:
-                try:
-                    with open(p, "w", encoding="utf-8") as f:
-                        json.dump(creds, f, ensure_ascii=False, indent=2)
-                except Exception as ex2:
-                    logger.error(f"保存微信凭证失败 ({p}): {ex2}")
+                if lp.exists():
+                    lp.unlink(missing_ok=True)
+            except Exception:
+                pass
         logger.info("微信凭证已安全持久化到本地。")
+        return True
 
     def clear_credentials(self):
         with self._lock:
             self.credentials = None
-            if self.creds_file.exists():
-                self.creds_file.unlink(missing_ok=True)
+            self.credential_source = ""
+            all_candidates = [self.creds_file, *self._legacy_credential_paths()]
+            for p in all_candidates:
+                try:
+                    if p.exists():
+                        p.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(f"清除凭证文件失败 ({p}): {e}")
             self.running = False
 
     def get_status(self) -> dict[str, Any]:
         """获取当前通道运行状态。"""
-        has_qr = bool(self.active_qr and not self.is_connected())
+        connected = self.is_connected()
+        token_expired = self.is_token_expired()
+        has_qr = bool(self.active_qr and not connected)
+        has_token = bool(self.credentials and self.credentials.get("bot_token"))
+        connected_at = float(self.credentials.get("connected_at") or 0) if has_token else 0.0
+        expires_at = (connected_at + self.token_ttl_sec) if connected_at else 0.0
+        remaining_sec = max(0.0, expires_at - time.time()) if expires_at else 0.0
+        expires_soon = bool(
+            has_token and not token_expired
+            and self.token_warn_sec > 0 and remaining_sec <= self.token_warn_sec
+        )
+
+        def _scrub(msg: str) -> str:
+            if msg and self.vault and hasattr(self.vault, "scrub"):
+                try:
+                    return self.vault.scrub(msg)
+                except Exception:
+                    return msg
+            return msg
+
+        last_error = _scrub(self.client.last_send_error or self.client.last_poll_error)
+        last_save_error = _scrub(self.last_save_error)
         return {
-            "connected": self.is_connected(),
+            "connected": connected,
+            "token_expired": token_expired,
+            "credential_missing": not has_token,
+            "credential_file_exists": self.creds_file.exists(),
+            "credential_source": self.credential_source,
+            "expires_at": expires_at or None,
+            "remaining_hours": round(remaining_sec / 3600, 2),
+            "expires_soon": expires_soon,
+            "token_ttl_hours": round(self.token_ttl_sec / 3600, 2),
+            "token_warn_hours": round(self.token_warn_sec / 3600, 2),
             "bot_id": self.credentials.get("ilink_bot_id", "") if self.credentials else "",
             "user_id": self.credentials.get("ilink_user_id", "") if self.credentials else "",
             "has_active_qr": has_qr,
             "qrcode_url": self.active_qr.get("qrcode_img_content", "") if has_qr else "",
             "qr_image_exists": self.qr_img_path.exists(),
+            "last_error": last_error,
+            "last_error_source": self.client.last_error_source if last_error else "",
+            "last_error_at": self.client.last_error_at or None,
+            "last_save_error": last_save_error,
         }
 
     def start_qr_login(self, force: bool = False) -> dict[str, Any]:
@@ -429,7 +627,7 @@ class WeixinChannel:
                         "💡 使用技巧：\n"
                         "1. 在此可直接发送任务指令控制电脑（如「打开 Clash」）；\n"
                         "2. 当电脑执行敏感操作触发授权时，系统会自动发通知到微信；\n"
-                        "3. 收到授权卡后，直接在此回复「1」或「同意」即可免键鼠授权，保护桌面鼠标坐标绝对精准！"
+                        "3. 收到授权卡后，回复「1」仅本次、「2」本会话同目标、「3」始终同目标，无需操作电脑键鼠！"
                     )
                     try:
                         self.client.send_message(
@@ -557,74 +755,168 @@ class WeixinChannel:
         self,
         text: str,
         token: str,
-        to_user: str,
-        from_user: str,
+        user_id: str,
+        bot_id: str,
         base_url: str,
         context_token: str | None,
     ) -> bool:
-        """检查是否有待审批事项，并支持通过微信数字/指令决断。"""
+        """检查是否有待审批事项，并支持通过微信数字/指令决断。
+
+        user_id 必须是发消息的人类用户（msg.from_user_id），审批卡在
+        notify_approval 时也是按这个 id 绑定的；机器人 id 只用于发送。
+        """
         if not self.approval_mgr:
             return False
 
         pending_cards = getattr(self.approval_mgr, "_pending", {})
-        if not pending_cards:
+        if not pending_cards and user_id not in self._active_approval_for_user:
             return False
 
-        # 匹配同意词：1, 同意, yes, y, ok, 确认, 通过, 批准
         approved_tokens = {"1", "同意", "yes", "y", "ok", "确认", "通过", "批准", "行", "准"}
-        # 匹配拒绝词：0, 拒绝, no, n, 取消, 驳回, 别, 不行
+        session_tokens = {"2", "本会话", "会话同意", "本会话同意"}
+        always_tokens = {"3", "始终", "始终同意", "永久同意"}
         rejected_tokens = {"0", "拒绝", "no", "n", "取消", "驳回", "不", "别", "不行"}
 
         cleaned = text.strip().lower()
-        if cleaned in approved_tokens or cleaned in rejected_tokens:
-            is_approved = cleaned in approved_tokens
-            # 取最早等待的一个审批卡
-            with getattr(self.approval_mgr, "_lock"):
-                target_aid = None
-                target_card = None
+        all_tokens = approved_tokens | session_tokens | always_tokens | rejected_tokens
+        if cleaned not in all_tokens:
+            return False
+
+        is_approved = cleaned not in rejected_tokens
+        scope = ("session" if cleaned in session_tokens
+                 else "always" if cleaned in always_tokens else "once")
+        # 严格绑定发送者与待决卡片（B3-06），杜绝误批其他用户或桌面会话卡片
+        target_aid = None
+        target_card = None
+        stale_mapping = False
+        with getattr(self.approval_mgr, "_lock"):
+            candidate_aid = self._active_approval_for_user.get(user_id)
+            if candidate_aid:
+                p = pending_cards.get(candidate_aid)
+                if p is not None and p.get("decision") is None:
+                    target_aid = candidate_aid
+                    target_card = p.get("card")
+                else:
+                    stale_mapping = True
+            if not target_aid:
+                # 匹配显式绑定该微信用户的待决卡片（后来推送覆盖了映射时兜底）
                 for aid, p in pending_cards.items():
-                    if p.get("decision") is None:
+                    c = p.get("card")
+                    if getattr(c, "target_user", "") == user_id and p.get("decision") is None:
                         target_aid = aid
-                        target_card = p.get("card")
+                        target_card = c
                         break
 
-            if target_aid:
-                action_name = getattr(target_card, "action_cn", "") or getattr(target_card, "action", "操作")
-                self.approval_mgr.resolve_card(target_aid, approved=is_approved, scope="once")
+        if target_aid:
+            self._active_approval_for_user.pop(user_id, None)
+            action_name = getattr(target_card, "action_cn", "") or getattr(target_card, "action", "操作")
+            high_risk_once = bool(is_approved and scope == "always"
+                                  and getattr(target_card, "risk", "") == "L3")
+            effective_scope = "once" if high_risk_once else scope
+            result = self.approval_mgr.resolve_card(
+                target_aid, approved=is_approved, scope=effective_scope)
+            if not isinstance(result, dict) or not result.get("ok"):
+                reply = "ℹ️ 这条审批已被处理，无需重复操作。"
+            else:
+                scope_label = {"once": "本次", "session": "本会话相同目标", "always": "始终相同目标"}[effective_scope]
+                if high_risk_once:
+                    scope_label = "本次（高风险不允许始终授权）"
                 reply = (
-                    f"✅ 已通过授权！Agent 正在电脑端继续执行：{action_name}"
+                    f"✅ 已通过{scope_label}授权！Agent 正在电脑端继续执行：{action_name}"
                     if is_approved
                     else f"❌ 已拒绝执行该操作 ({action_name})，Agent 将调整执行路径。"
                 )
-                self.client.send_message(
-                    token=token,
-                    to_user_id=to_user,
-                    from_user_id="",
-                    text=reply,
-                    context_token=context_token,
-                    base_url=base_url,
-                )
-                # 同步微信审批决断至前端 UI
-                if self.on_event:
-                    self.on_event("message", {
-                        "id": f"msg_wx_u_{int(time.time() * 1000)}",
-                        "type": "user",
-                        "role": "user",
-                        "content": f"📱 [微信用户] {text.strip()} ({'同意授权' if is_approved else '拒绝授权'})",
-                        "tool_calls": [],
-                        "created_at": time.strftime("%H:%M", time.localtime()),
-                    })
-                    self.on_event("message", {
-                        "id": f"msg_wx_a_{int(time.time() * 1000)}",
-                        "type": "assistant_final",
-                        "role": "agent",
-                        "content": reply,
-                        "tool_calls": [],
-                        "created_at": time.strftime("%H:%M", time.localtime()),
-                    })
-                return True
+            self._send_approval_reply(
+                token, user_id, base_url, context_token, reply,
+                target_card, text, is_approved)
+            return True
+
+        if stale_mapping:
+            # 卡片已在电脑端处理，映射还留着：明确告知，绝不把 "1" 当新任务派发
+            self._active_approval_for_user.pop(user_id, None)
+            self._send_approval_reply(
+                token, user_id, base_url, context_token,
+                "ℹ️ 这条审批已在电脑端处理，无需重复操作。", None, text, is_approved)
+            return True
 
         return False
+
+    def _send_approval_reply(
+        self,
+        token: str,
+        user_id: str,
+        base_url: str,
+        context_token: str | None,
+        reply: str,
+        card: Any,
+        raw_text: str,
+        is_approved: bool,
+    ):
+        try:
+            self.client.send_message(
+                token=token,
+                to_user_id=user_id,
+                from_user_id="",
+                text=reply,
+                context_token=context_token,
+                base_url=base_url,
+            )
+        except Exception as e:
+            self._log_runtime_error("weixin_approval_reply_error", e, session_id=getattr(card, "session_id", "") or "")
+
+        # 同步微信审批决断至前端 UI，并带上归属会话，避免串台
+        if self.on_event:
+            sid = getattr(card, "session_id", "") or ""
+            try:
+                self.on_event("message", {
+                    "id": f"msg_wx_u_{int(time.time() * 1000)}",
+                    "type": "user",
+                    "role": "user",
+                    "content": f"📱 [微信用户] {raw_text.strip()} ({'同意授权' if is_approved else '拒绝授权'})",
+                    "tool_calls": [],
+                    "created_at": time.strftime("%H:%M", time.localtime()),
+                    "session_id": sid,
+                })
+                self.on_event("message", {
+                    "id": f"msg_wx_a_{int(time.time() * 1000)}",
+                    "type": "assistant_final",
+                    "role": "agent",
+                    "content": reply,
+                    "tool_calls": [],
+                    "created_at": time.strftime("%H:%M", time.localtime()),
+                    "session_id": sid,
+                })
+            except Exception as e:
+                self._log_runtime_error("weixin_approval_event_error", e, session_id=sid)
+            if sid:
+                self._emit_session_activity(sid, created=False)
+
+    def _session_exists(self, sid: str) -> bool:
+        if not sid or not self.session_store:
+            return False
+        try:
+            return bool(self.session_store.db.execute(
+                "SELECT 1 FROM sessions WHERE session_id=?", (sid,)).fetchone())
+        except Exception:
+            return False
+
+    def _emit_session_activity(self, sid: str, created: bool, title_hint: str = ""):
+        """广播微信会话活动：前端据此刷新会话列表并标记未读。
+
+        微信会话在后台推进，前端只有收到这类事件才会重新拉取会话列表；
+        否则要重启/新建会话才能看见微信聊天记录。
+        """
+        if not sid or not self.on_event:
+            return
+        try:
+            self.on_event("session_created" if created else "session_updated", {
+                "id": sid,
+                "title": f"微信: {title_hint[:12]}" if created and title_hint else "",
+                "source": "weixin",
+                "last_ts": int(time.time() * 1000),
+            })
+        except Exception as e:
+            self._log_runtime_error("weixin_session_event_error", e, session_id=sid)
 
     def _log_runtime_error(self, event: str, exc: Exception, **metadata):
         logger.error("%s (%s)", event, type(exc).__name__)
@@ -680,13 +972,9 @@ class WeixinChannel:
                 # A failed load must never reuse another session's live history.
                 self.orch.history = []
             try:
-                # 1. Find the session before accepting or persisting a message.
+                # 1. 显式绑定或创建独立微信会话（B3-06），杜绝窃取桌面会话
                 if not sid and self.session_store:
-                    rows = self.session_store.list_sessions(limit=1)
-                    if rows:
-                        sid = rows[0]["session_id"]
-                    else:
-                        sid = self.session_store.new_session(user_text[:15] or "微信会话")
+                    sid = self.session_store.new_session(f"微信: {user_text[:12] or to_user}")
                     self.weixin_session_id = sid
                 self.orch.session_id = sid or f"weixin:{to_user}"
 
@@ -714,7 +1002,13 @@ class WeixinChannel:
                 user_msg = Message(role="user", content=user_text)
                 self.orch.history.append(user_msg)
                 if sid and self.session_store:
+                    created = not self._session_exists(sid)
                     self.session_store.save_history(sid, self.orch.history)
+                    if created:
+                        # save_history 的兜底标题取首条消息，对微信会话不够辨识，
+                        # 首次落库后统一改成「微信: 」前缀，列表里一眼可辨。
+                        self.session_store.update_title(sid, f"微信: {user_text[:12] or to_user}")
+                    self._emit_session_activity(sid, created, user_text)
                 # The callback is scoped to this turn and never forwards model-supplied
                 # text to Weixin. Mark before attempting delivery, including failures.
                 active_session_id = self.orch.session_id
@@ -771,6 +1065,7 @@ class WeixinChannel:
                 if sid and self.session_store:
                     try:
                         self.session_store.save_history(sid, self.orch.history)
+                        self._emit_session_activity(sid, created=False)
                     except Exception as _e:
                         self._log_runtime_error("weixin_history_save_error", _e, session_id=sid)
 
@@ -888,6 +1183,7 @@ class WeixinChannel:
         summary_cn = getattr(card, "summary_cn", "") or getattr(card, "detail", "")
         intent_cn = getattr(card, "intent_cn", "") or "推进当前任务"
         risk_level = getattr(card, "risk_level", getattr(card, "risk", "L2"))
+        always_line = "" if risk_level == "L3" else "【3】：始终允许相同操作/同一文件\n"
 
         notice = (
             "🛡️ 【桌面操作授权确认】\n"
@@ -896,10 +1192,18 @@ class WeixinChannel:
             f"● 操作目的：{intent_cn}\n"
             f"● 风险等级：{risk_level}\n\n"
             "👉 请在手机微信直接回复：\n"
-            "【1】或「同意」：通过授权\n"
+            "【1】或「同意」：仅本次授权\n"
+            "【2】：本会话允许相同操作/同一文件\n"
+            f"{always_line}"
             "【0】或「拒绝」：拒绝操作\n"
             "（注：在微信中确认无需动电脑键鼠，保障桌面自动化坐标绝对精准）"
         )
+
+        # 回执必须能绑定到人：卡片记住推送对象，消息侧按人类用户匹配
+        try:
+            card.target_user = user_id
+        except Exception:
+            pass
 
         try:
             self.client.send_message(
@@ -910,6 +1214,9 @@ class WeixinChannel:
                 context_token=context_token,
                 base_url=base_url,
             )
+            aid = getattr(card, "approval_id", None)
+            if aid:
+                self._active_approval_for_user[user_id] = aid
             logger.info("已将审批申请实时推送到用户手机微信。")
             return "sent"
         except Exception as e:
@@ -940,6 +1247,7 @@ if __name__ == "__main__":
     # 尝试加载完整 Agent 引擎（Orchestrator 与 ApprovalManager）
     orch = None
     approval_mgr = None
+    weixin_cfg: dict[str, Any] = {}
     try:
         from agent.main import load_config, resolve_llm_key, resolve_backup_llm_key
         from agent.llm import LLMClient
@@ -951,6 +1259,9 @@ if __name__ == "__main__":
         from vault import Vault
 
         cfg = load_config()
+        raw_weixin = cfg.get("weixin") if isinstance(cfg, dict) else None
+        if isinstance(raw_weixin, dict):
+            weixin_cfg = raw_weixin
         vault = Vault.for_machine(root_dir)
         llm_key = resolve_llm_key(vault)
         backup_key = resolve_backup_llm_key(vault)
@@ -964,7 +1275,13 @@ if __name__ == "__main__":
     except Exception as err:
         print(f"⚠️ 以独立通道模式运行 (未注入完整桌面引擎: {err})")
 
-    channel = WeixinChannel(data_dir=data_dir, orch=orch, approval_mgr=approval_mgr)
+    channel = WeixinChannel(
+        data_dir=data_dir,
+        orch=orch,
+        approval_mgr=approval_mgr,
+        token_ttl_sec=_hours_to_sec(weixin_cfg.get("token_ttl_hours")),
+        token_warn_sec=_hours_to_sec(weixin_cfg.get("token_warn_hours")),
+    )
 
     if channel.is_connected():
         print(f"\n✅ 微信 ClawBot 已连接！绑定用户 ID: {channel.credentials.get('ilink_user_id')}")

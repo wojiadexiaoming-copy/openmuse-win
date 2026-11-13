@@ -35,9 +35,16 @@ class ArtifactManager:
 
     def __init__(self, root: str | None = None):
         if root is None:
-            root = os.path.join(os.path.expanduser("~"), ".alterego", "artifacts")
+            try:
+                from agent.paths import resolve_sub_dir
+                root = str(resolve_sub_dir("artifacts"))
+            except Exception:
+                root = os.path.join(os.path.expanduser("~"), ".alterego", "artifacts")
         self.root = root
-        os.makedirs(root, exist_ok=True)
+        try:
+            os.makedirs(root, exist_ok=True)
+        except (PermissionError, OSError):
+            pass
         self._items: dict[str, Artifact] = {}
 
     def create(self, kind: str, title: str) -> Artifact:
@@ -139,6 +146,9 @@ def make_artifact_tools(manager: "ArtifactManager"):
                              "title": {"type": "string"}},
                          "required": ["kind", "title"]},
             func=_create,
+            parallel_safe=False,
+            is_readonly=False,
+            cacheable=False,
         ),
         ToolDefinition(
             name="artifact_list",
@@ -147,5 +157,8 @@ def make_artifact_tools(manager: "ArtifactManager"):
                          "properties": {"kind": {"type": "string"}},
                          "required": []},
             func=_list,
+            parallel_safe=True,
+            is_readonly=True,
+            cacheable=False,
         ),
     ]

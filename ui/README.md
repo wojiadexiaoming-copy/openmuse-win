@@ -1,6 +1,7 @@
 # ui/ 说明
 
-- `index.html` / `takeover.html` / `static/`：完整 H5 客户端（按 spec §31 定稿，正常三栏 + 接管小浮窗），接口定义见 `api.md`。
+- `index.html` / `static/`：完整 H5 客户端（按 spec §31 定稿；`static/float.html` 为接管/六态浮窗），接口定义见 `api.md`。
+- `takeover.html`：旧版接管小浮窗，仅作 `GET /takeover.html` 回滚保留，生产已改用 `static/float.html`。
 - `launcher.py`：pywebview 桌面壳，自动拉起多线程 REST/SSE 服务端与原生桌面客户端窗口。
 - `server.py`：基于 Bottle + WSGIServer 的 REST/SSE 双向通信后端，支持会话、聊天流式响应、审批流决策、截屏回显与任务跟踪。
 - `takeover_window.py`：独立子进程置顶小浮窗，支持实时倒计时、快捷键及接管事件通知。

@@ -73,7 +73,7 @@ class TTSManager:
                     f.write(f"file '{p}'\n")
             subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
                             "-i", lst, "-c", "copy", out],
-                           check=True, capture_output=True)
+                           check=True, capture_output=True, timeout=120)
         dur = self._probe_duration(out)
         return {"path": out, "duration_sec": dur, "segments": len(parts)}
 
@@ -154,5 +154,8 @@ def make_tts_tools(manager: "TTSManager"):
                              "rate": {"type": "string", "description": "语速，如 +0%"}},
                          "required": ["text"]},
             func=_synth,
+            parallel_safe=False,
+            is_readonly=False,
+            cacheable=False,
         ),
     ]

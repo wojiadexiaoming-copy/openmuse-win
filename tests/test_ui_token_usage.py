@@ -4,6 +4,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from bottle import Bottle
@@ -160,3 +161,84 @@ def test_state_api_returns_known_partial_totals_and_unknown_count(usage_server):
     assert snapshot["input"] == 10 and snapshot["output"] == 3
     assert snapshot["known_requests"] == 1 and snapshot["unknown_requests"] == 1
     assert snapshot["revision"] == 2
+
+
+def test_upload_and_chat_attachment_resolution(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALTEREGO_LLM_API_KEY", "sk-mock-key")
+    server = AgentServer(data_dir=tmp_path)
+    client = server.app
+
+    # 1. /api/uploads without token -> 401
+    statuses = []
+    def start_response(status, headers, exc_info=None):
+        statuses.append(status)
+
+    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+    file_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="tiny.png"\r\n'
+        f"Content-Type: image/png\r\n\r\n"
+    ).encode("ascii") + file_bytes + f"\r\n--{boundary}--\r\n".encode("ascii")
+
+    env_no_auth = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/api/uploads",
+        "CONTENT_TYPE": f"multipart/form-data; boundary={boundary}",
+        "CONTENT_LENGTH": str(len(body)),
+        "wsgi.input": io.BytesIO(body),
+        "wsgi.errors": io.StringIO(),
+    }
+    resp = client(env_no_auth, start_response)
+    assert "401" in statuses[0]
+
+    # 2. /api/uploads with token -> 200
+    statuses.clear()
+    env_auth = dict(env_no_auth)
+    env_auth["HTTP_AUTHORIZATION"] = f"Bearer {server.api_token}"
+    env_auth["wsgi.input"] = io.BytesIO(body)
+    resp = client(env_auth, start_response)
+    assert "200" in statuses[0]
+    upload_res = json.loads(b"".join(resp).decode("utf-8"))
+    assert upload_res["filename"] == "tiny.png"
+    assert "upload_id" in upload_res
+    assert upload_res["url"].startswith("/uploads/")
+
+    # 3. /api/chat resolves uploaded image attachment from content link into ImagePart
+    server.orch.handle = MagicMock(return_value="I saw your attachment")
+    statuses.clear()
+    chat_body = json.dumps({
+        "content": f"Please look at this [附件: tiny.png]({upload_res['url']})"
+    }).encode("utf-8")
+    env_chat = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/api/chat",
+        "HTTP_AUTHORIZATION": f"Bearer {server.api_token}",
+        "CONTENT_TYPE": "application/json",
+        "CONTENT_LENGTH": str(len(chat_body)),
+        "wsgi.input": io.BytesIO(chat_body),
+        "wsgi.errors": io.StringIO(),
+    }
+    resp = client(env_chat, start_response)
+    assert "200" in statuses[0]
+    # Check that server.orch.history contains the user message with image attached
+    last_user_msg = [m for m in server.orch.history if m.role == "user"][-1]
+    assert len(last_user_msg.images) == 1
+    assert last_user_msg.images[0].mime_type == "image/png"
+    assert len(last_user_msg.images[0].data_base64) > 0
+
+    # 4. /api/window/split_ratio accepts auth token
+    statuses.clear()
+    ratio_body = json.dumps({"browser_ratio": 0.75}).encode("utf-8")
+    env_ratio = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/api/window/split_ratio",
+        "HTTP_X_ALTEREGO_TOKEN": server.api_token,
+        "CONTENT_TYPE": "application/json",
+        "CONTENT_LENGTH": str(len(ratio_body)),
+        "wsgi.input": io.BytesIO(ratio_body),
+        "wsgi.errors": io.StringIO(),
+    }
+    resp = client(env_ratio, start_response)
+    assert "200" in statuses[0]
+

@@ -32,7 +32,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent.approval import ApprovalManager
+from agent import APP_VERSION
 from agent.context import ContextBuilder
+from agent.evolution_tools import make_evolution_tools
+from agent.experience import ExperienceStore
 from agent.llm import LLMClient
 from agent.main import cli_on_ask, load_config, resolve_llm_key, resolve_backup_llm_key
 from agent.memory_manager import MemoryManager
@@ -44,6 +47,8 @@ from agent.resource_lock import ResourceLock
 from agent.scheduler import Scheduler, JobSpec
 from agent.session_store import SessionStore
 from agent.settings import Settings
+from agent.skill_distiller import SkillManager
+from agent.skill_review import run_skill_review
 from agent.state_text import tool_summary, result_summary
 from agent.subagent import SubagentManager, make_subagent_tools
 from agent.takeover import TakeoverManager, set_takeover_manager
@@ -56,6 +61,14 @@ from vault import Vault
 
 UI_DIR = Path(__file__).resolve().parent
 logger = logging.getLogger("alterego.ui.server")
+
+# 会话级 SSE 事件：统一补 session_id，前端据此把微信/桌面的进度、审批
+# 分流到各自会话，避免微信任务的思考/授权状态串到当前打开的桌面会话。
+SESSION_SCOPED_EVENTS = frozenset({
+    "agent_state", "plan_update", "tool_call_started", "tool_call_done",
+    "subagent_update", "task_progress", "task_update", "turn_notice",
+    "approval_request", "approval_resolved", "takeover_request", "takeover_update",
+})
 
 
 class _ConcurrentWSGIServer(ThreadingMixIn, WSGIServer):
@@ -90,6 +103,10 @@ class ThreadedWSGIServer(ServerAdapter):
 
 class EventBus:
     """Server-Sent Events 广播总线。"""
+    # v2.5 U1：审批类事件不允许被队列满静默丢弃——丢一张卡 = 用户 300s 后
+    # 才发现任务"莫名失败"。队列满时挤掉最旧一条普通事件为其腾位。
+    PRIORITY_EVENTS = {"approval_request"}
+
     def __init__(self):
         self._subscribers: list[queue.Queue] = []
         self._lock = threading.Lock()
@@ -113,7 +130,12 @@ class EventBus:
                 try:
                     q.put_nowait(msg)
                 except queue.Full:
-                    pass
+                    if event in self.PRIORITY_EVENTS:
+                        try:
+                            q.get_nowait()  # 丢弃最旧的普通事件，保审批卡必达
+                            q.put_nowait(msg)
+                        except (queue.Empty, queue.Full):
+                            pass
 
 
 class AgentServer:
@@ -190,16 +212,22 @@ class AgentServer:
         register_all(self.registry, self.cfg, api_key=media_key or backup_key or llm_key)
 
         self._startup_phase("open_settings_and_approvals")
+        beh_cfg = self.cfg.get("behavior") or {}
+        approval_timeout = int(beh_cfg.get("approval_timeout_sec", 180))
         self.settings = Settings(self.data_dir / "settings.json")
-        self.approval = ApprovalManager(str(self.data_dir / "approvals.db"), settings=self.settings)
+        self.approval = ApprovalManager(str(self.data_dir / "approvals.db"), timeout_sec=approval_timeout, settings=self.settings)
 
         # UI 审批回调：等待用户在网页上批准或拒绝，并实时推送到网页
         def ui_on_ask(card):
             risk = getattr(card, "risk_level", getattr(card, "risk", "L2"))
             created = getattr(card, "requested_at", getattr(card, "created_at", time.time()))
-            timeout = getattr(card, "timeout_sec", 300)
+            timeout = getattr(card, "timeout_sec", getattr(self.approval, "timeout_sec", 180))
+            # 审批归属会话：微信发起的任务同样走这条回调，卡片必须记住
+            # 自己属于哪个会话，前端才能把授权卡放回微信会话而不是桌面会话。
+            card.session_id = getattr(self.orch, "session_id", "") or ""
             card_dict = {
                 "approval_id": card.approval_id,
+                "session_id": card.session_id,
                 "action": card.action,
                 "action_cn": getattr(card, "action_cn", "") or card.action,
                 "summary_cn": getattr(card, "summary_cn", "") or card.detail,
@@ -326,10 +354,19 @@ class AgentServer:
         self._refresh_model_status()
         self._startup_phase("initialize_memory")
         self.memory = MemoryManager(self.data_dir / "memory")
+        self.experience = ExperienceStore(str(self.data_dir / "experience.db"))
+        self.skills = SkillManager(self.data_dir / "skills.json")
+        for tool in make_evolution_tools(self.memory, self.skills):
+            if tool.name not in self.registry:
+                self.registry.register(tool)
+        self.skills.register_all(self.registry)
 
         self.takeover_mgr = TakeoverManager(
             event_bus=self.event_bus,
             on_event=self.emit_event,
+            # §39.18：接管不自动弹桌面浮窗，避免抢焦点盖住待操作的浏览器；
+            # 主窗口隐藏时托盘浮窗会按快照自动切到接管卡片。
+            auto_show_window=False,
             port=self.port,
             token=self.api_token,
         )
@@ -349,9 +386,11 @@ class AgentServer:
         )
         self._startup_phase("open_conversation_database")
         self.store = SessionStore(str(self.data_dir / "conversations.db"))
+        self._preseed_token_usage_from_db()
         # 启动时检查未完成任务：在归档前先看最新 session 是否有 incomplete 任务
         # 若有，通过 SSE 事件通知前端弹"继续/丢弃"提示
         self._pending_resume_prompt = None
+        self._resume_reminded: set[str] = set()
         keep_sid = None
         try:
             sessions = self.store.list_sessions(limit=1)
@@ -410,7 +449,7 @@ class AgentServer:
 
         def _make_sub_orchestrator(task):
             role = "code" if getattr(task, "kind", "generic") == "code" else "subagent"
-            if (role == "code" and not self.cfg.get("llm_router", {}).get("enabled")
+            if (role == "code" and not (self.cfg.get("llm_router") or {}).get("enabled")
                     and "code" not in self.cfg.get("models", {}).get("roles", {})):
                 role = "subagent"
             sub_llm = LLMClient.for_role(
@@ -433,15 +472,27 @@ class AgentServer:
                 max_tokens=self.cfg["context"]["max_context_tokens"] // 2,
                 extra_system=sub_prompt,
             )
-            return Orchestrator(sub_llm, self.registry, sub_ctx,
-                                max_iters=15, parallel_tools=False,
-                                tracer=self.tracer, tracker=self.tracker, planner=None,
-                                on_event=self.emit_event)
+            agent_cfg = self.cfg.get("agent", {}) or {}
+            return Orchestrator(
+                sub_llm, self.registry, sub_ctx,
+                max_iters=agent_cfg.get("subagent_max_iters", 20),
+                max_iters_hard=agent_cfg.get("subagent_max_iters_hard", 60),
+                step_grant=agent_cfg.get("subagent_step_grant", 10),
+                max_turn_wall_clock_sec=agent_cfg.get(
+                    "subagent_max_turn_sec", 300.0),
+                turn_extension_sec=agent_cfg.get(
+                    "subagent_turn_extension_sec", 120.0),
+                turn_max_extensions=agent_cfg.get(
+                    "subagent_max_extensions", 2),
+                parallel_tools=False,
+                tracer=self.tracer, tracker=self.tracker, planner=None,
+                on_event=self.emit_event)
 
         self._startup_phase("initialize_agent")
         self.sub_mgr = SubagentManager(
             make_orchestrator=_make_sub_orchestrator,
             on_queue_update=lambda qsize: self.emit_event("subagent_update", {"queue_waiting": qsize}),
+            store_path=self.data_dir / "subagents.db",
         )
         for t in make_subagent_tools(self.sub_mgr):
             self.registry.register(t)
@@ -494,19 +545,24 @@ class AgentServer:
         def _schedule_once(args: dict) -> str:
             try:
                 secs = int(args.get("seconds", 0))
-                brief = args.get("brief", "")
-                if secs <= 0:
-                    return "[工具执行失败] seconds 必须 > 0"
-                if not hasattr(self, "orch") or self.orch is None:
-                    return "[工具执行失败] Orchestrator 未就绪"
-                jid = self.orch.schedule_once(secs, brief)
+                brief = str(args.get("brief", "") or "").strip()
+                if secs <= 0 or secs > 86400:
+                    return "[工具执行失败] seconds 须在 1~86400 之间"
+                if not brief:
+                    return "[工具执行失败] brief 不能为空"
+                scheduler = getattr(self, "scheduler", None)
+                if scheduler is None:
+                    return "[工具执行失败] 定时器未就绪"
+                jid = f"once-{uuid.uuid4().hex[:8]}"
+                scheduler.add(JobSpec(job_id=jid, kind="once", brief=brief,
+                                      trigger_args={"seconds": secs}))
                 return f"[定时已设置] {secs} 秒后提醒：{brief[:50]}（job={jid}）"
             except Exception as e:
                 return f"[工具执行失败] {e}"
 
         self.registry.register(ToolDefinition(
             name="schedule_once",
-            description="N 秒后提醒我做某事（替代 sleep 硬等）。到时会自动注入提醒。",
+            description="N 秒后提醒我做某事（替代 sleep 硬等）。到时会发 Windows 系统通知，不会注入当前对话。",
             parameters={"type": "object",
                          "properties": {
                              "seconds": {"type": "integer", "description": "几秒后"},
@@ -524,6 +580,13 @@ class AgentServer:
             self.ctx,
             max_iters=self.cfg["agent"].get("max_iters", 25),
             max_iters_hard=self.cfg["agent"].get("max_iters_hard", 100),
+            step_grant=self.cfg["agent"].get("step_grant", 10),
+            max_turn_wall_clock_sec=self.cfg["agent"].get(
+                "max_turn_wall_clock_sec", 600.0),
+            turn_extension_sec=self.cfg["agent"].get(
+                "turn_extension_sec", 180.0),
+            turn_max_extensions=self.cfg["agent"].get(
+                "turn_max_extensions", 3),
             parallel_tools=self.cfg["agent"].get("parallel_tools", False),
             tracer=self.tracer,
             tracker=self.tracker,
@@ -537,12 +600,35 @@ class AgentServer:
         # 后台记忆管线调度 (spec §8 / memory-pipeline.md / B4 优化)
 
         def _on_scheduled_job(job_id: str, brief: str):
+            scope = "nightly" if "nightly" in job_id else "hourly"
             try:
-                scope = "nightly" if "nightly" in job_id else "hourly"
+                if job_id.startswith("once-"):
+                    try:
+                        from agent.notify import notify
+                        notify(title="AlterEgo 定时提醒", message=brief, urgent=False)
+                    except Exception:
+                        pass
+                    self.emit_event("schedule_fire",
+                                    {"job_id": job_id, "brief": brief})
+                    return
+                if job_id == "exp_decay":
+                    self.experience.decay_job()
+                    self.tracer.log_event("experience_decay", {"status": "ok"})
+                    return
+                if job_id == "skill_review":
+                    run_skill_review(
+                        store=self.store,
+                        skill_manager=self.skills,
+                        registry=self.registry,
+                        tracer=self.tracer,
+                        limit=int(self.cfg["agent"].get("skill_review_sessions", 60)),
+                    )
+                    return
                 run_memory_distill(
                     memory=self.memory,
                     store=self.store,
                     tracer=self.tracer,
+                    experience_store=self.experience,
                     scope=scope,
                     vault=self.vault,
                     cfg=self.cfg,
@@ -568,6 +654,18 @@ class AgentServer:
                 kind="cron",
                 brief="每晚深度记忆蒸馏",
                 trigger_args={"hour": 2, "minute": 0},
+            ))
+            self.scheduler.add(JobSpec(
+                job_id="exp_decay",
+                kind="cron",
+                brief="每晚经验置信度衰减与归档",
+                trigger_args={"hour": 2, "minute": 10},
+            ))
+            self.scheduler.add(JobSpec(
+                job_id="skill_review",
+                kind="cron",
+                brief="每晚技能评审与轨迹蒸馏",
+                trigger_args={"hour": 2, "minute": 30},
             ))
         except Exception as e:
             self._log_runtime_error("memory_scheduler_start_error", e)
@@ -626,6 +724,29 @@ class AgentServer:
             "scope": "application_recorded_requests", "input": None, "output": None,
             "known_requests": 0, "unknown_requests": 0,
         }
+
+
+    def _preseed_token_usage_from_db(self):
+        """从 conversations.db 预加载历史累计 Token 用量，防止重启后用量归零。"""
+        if not hasattr(self, "store") or not self.store:
+            return
+        try:
+            stats = self.store.get_token_usage_stats(range_days=0)
+            summary = stats.get("summary", {})
+            reqs = summary.get("requests", 0)
+            if reqs > 0:
+                in_tok = summary.get("input_tokens", 0)
+                out_tok = summary.get("output_tokens", 0)
+                with self._token_usage_lock:
+                    usage = dict(self.state_snapshot["status"]["token_usage"])
+                    usage["input"] = in_tok
+                    usage["output"] = out_tok
+                    usage["known_requests"] = reqs
+                    usage["revision"] += 1
+                    self.state_snapshot["status"]["token_usage"] = usage
+        except Exception as exc:
+            import logging
+            logging.getLogger("alterego.ui.server").warning("[TokenUsage] 从数据库预加载历史 Token 失败: %s", exc)
 
     def _record_token_usage(self, metadata):
         if not isinstance(metadata, dict) or metadata.get("request_attempted") is not True:
@@ -723,8 +844,142 @@ class AgentServer:
             self.takeover_mgr.port = self._port
 
     def set_ui_window(self, window):
-        """保存原生桌面 PyWebView 窗口实例，用于分屏联动。"""
+        """保存原生桌面 PyWebView 窗口实例，用于分屏联动与窗口控制。"""
         self._ui_window = window
+        self._win_is_max = False
+        try:
+            def _on_max():
+                self._win_is_max = True
+
+            def _on_rest():
+                self._win_is_max = False
+
+            window.events.maximized += _on_max
+            window.events.restored += _on_rest
+        except Exception as e:
+            logger.debug("[set_ui_window] 窗口状态事件订阅失败: %s", e)
+        self._start_tray()
+
+    def _ulog(self, msg):
+        """窗口/托盘事件持久化日志（data/logs/ui-window.log）——❌ 决策可追溯。"""
+        try:
+            import time as _time
+            log_dir = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "data", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, "ui-window.log"), "a", encoding="utf-8") as fp:
+                fp.write(_time.strftime("[%Y-%m-%d %H:%M:%S] ") + msg + "\n")
+        except Exception:
+            pass
+        logger.info("[ui-window] %s", msg)
+
+    def _start_tray(self):
+        """系统托盘图标（pystray）：左键召回主窗口，右键菜单 打开主窗口/退出。"""
+        if os.environ.get("ALTEREGO_HEADLESS") == "1" or os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        if getattr(self, "_tray_started", False):
+            return
+        self._tray_started = True
+        try:
+            import threading
+            from PIL import Image
+            import pystray
+        except Exception as e:
+            self._ulog("托盘启动失败：pystray/Pillow 不可用 %s" % e)
+            return
+
+        def _show_main(icon=None, item=None):
+            win = getattr(self, "_ui_window", None)
+            if win:
+                try:
+                    if hasattr(win, "show"):
+                        win.show()
+                    if hasattr(win, "restore"):
+                        win.restore()
+                except Exception:
+                    pass
+
+        menu = pystray.Menu(
+            pystray.MenuItem("打开主窗口", _show_main, default=True),
+            pystray.MenuItem("退出", lambda icon, item: self._really_exit()),
+        )
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "ui", "static", "alterego.png")
+            img = Image.open(icon_path).convert("RGBA").resize((64, 64))
+        except Exception:
+            img = pystray.Icon("AlterEgo").icon or None
+            img = None
+            try:
+                from PIL import ImageDraw
+                img = Image.new("RGBA", (64, 64), (24, 24, 28, 255))
+                d = ImageDraw.Draw(img)
+                d.ellipse((8, 8, 56, 56), fill=(236, 72, 153, 255))
+                d.text((26, 20), "A", fill=(255, 255, 255, 255))
+            except Exception:
+                img = Image.new("RGBA", (64, 64), (236, 72, 153, 255))
+        try:
+            icon = pystray.Icon("AlterEgo", img, "AlterEgo", menu)
+            threading.Thread(target=icon.run, daemon=True).start()
+            self._ulog("托盘图标已启动（若未见于托盘区，请点任务栏右下角 ^ 展开隐藏图标）")
+        except Exception as e:
+            self._ulog("托盘图标启动失败: %s" % e)
+
+    def _really_exit(self):
+        """真正退出：销毁（可能隐藏的）主窗口并停服。"""
+        import threading as _threading
+
+        def _shutdown():
+            try:
+                win = getattr(self, "_ui_window", None)
+                if win and hasattr(win, "destroy"):
+                    win.destroy()
+            except Exception:
+                pass
+            try:
+                stop = getattr(self, "shutdown", None)
+                if callable(stop):
+                    stop()
+            except Exception:
+                pass
+            _threading.Timer(2.0, lambda: os._exit(0)).start()
+
+        _threading.Thread(target=_shutdown, daemon=True).start()
+
+    def _has_active_turn(self):
+        """任务运行中判定（浮窗触发，MIGRATION.md v1.1.7）：状态机非 idle / 有待审批 / 有接管。"""
+        try:
+            st = (self.state_snapshot.get("agent_state") or {}).get("state") or "idle"
+            if st in ("thinking", "acting", "waiting_subagent", "awaiting_approval",
+                      "paused_takeover", "waiting_user"):
+                return True
+            if self.state_snapshot.get("approvals"):
+                return True
+            if self.state_snapshot.get("active_takeover"):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _spawn_float_window(self):
+        """弹浮窗子进程（同一时刻只保留一个）；复用 takeover_window 的子进程机制。"""
+        if os.environ.get("ALTEREGO_HEADLESS") == "1" or os.environ.get("PYTEST_CURRENT_TEST"):
+            return None
+        proc = getattr(self, "_float_proc", None)
+        if proc is not None and proc.poll() is None:
+            return proc
+        try:
+            from ui.takeover_window import show_takeover_window_async
+            token = getattr(self, "api_token", "")
+            proc = show_takeover_window_async(
+                task_id="main", target="", reason="主窗口已最小化，任务后台运行中",
+                port=int(request.environ.get("SERVER_PORT") or 5000), token=token)
+            self._float_proc = proc
+        except Exception as e:
+            logger.warning("[float] 弹出浮窗失败（任务继续后台运行）: %s", e)
+            return None
+        logger.info("[float] 浮窗子进程已启动 pid=%s", getattr(proc, "pid", "?"))
+        return proc
 
     @contextmanager
     def _conversation_turn(self, sid: str):
@@ -740,6 +995,67 @@ class AgentServer:
             finally:
                 self.orch.on_history = previous_callback
                 self.orch.session_id = previous_session
+
+    @staticmethod
+    def _resume_status_hint(status: str) -> str:
+        return {
+            "incomplete": "步骤/时间耗尽，未完成",
+            "waiting_user": "停在等待你补充信息",
+            "error": "执行出错中断",
+            "running": "进程重启中断",
+        }.get(status, "未完成")
+
+    def _current_resume_candidate(self) -> dict | None:
+        """启动时发现的遗留任务快照；每次读取都回查数据库，完成/丢弃后自动失效。"""
+        candidate = getattr(self, "_pending_resume_prompt", None)
+        if not candidate:
+            return None
+        sid = candidate.get("session_id")
+        if not sid:
+            return None
+        try:
+            info = self.store.get_incomplete_task(sid)
+        except Exception:
+            return candidate  # 查询失败时保留快照：宁可提醒一次，也别悄悄丢掉
+        if not info:
+            self._pending_resume_prompt = None
+            return None
+        merged = {**candidate, **info}
+        self._pending_resume_prompt = merged
+        return merged
+
+    def _resume_notice_text(self, sid: str, user_text: str) -> str:
+        """重启遗留任务的一次性提醒文本（进 system prompt，不落会话历史）。
+
+        只在新话题时生效：用户主动「继续/重试」或补充等待中的信息时，
+        本来就在处理旧任务，再提醒一次只会制造噪声。
+        """
+        candidate = self._current_resume_candidate()
+        if not candidate:
+            return ""
+        if not self.orch.is_new_topic(user_text):
+            return ""
+        key = candidate.get("session_id") or sid
+        reminded = getattr(self, "_resume_reminded", None)
+        if reminded is None:
+            reminded = self._resume_reminded = set()
+        if key in reminded:
+            return ""
+        reminded.add(key)
+        desc = (candidate.get("task_desc") or "").strip() or "（任务描述缺失）"
+        if len(desc) > 120:
+            desc = desc[:120] + "…"
+        hint = self._resume_status_hint(candidate.get("task_status") or "")
+        when = ""
+        ts = candidate.get("last_update")
+        if isinstance(ts, (int, float)) and ts > 0:
+            when = "，最后更新于 " + time.strftime("%m-%d %H:%M", time.localtime(ts))
+        return (
+            f"上一进程遗留了一个未完成的任务：「{desc}」（状态：{hint}{when}）。\n"
+            "用户本条消息看起来是新话题。请先正常完成当前请求，然后在回复末尾用"
+            "一句话询问用户是否需要继续处理那个遗留任务；不要为提醒而打断或推迟"
+            "当前请求，也不要在用户确认前擅自开始执行旧任务。"
+        )
 
     def _log_runtime_error(self, event: str, exc: Exception, **metadata):
         """异常日志只保留类型与诊断元数据，避免凭证或工具参数落日志。"""
@@ -774,6 +1090,9 @@ class AgentServer:
         else:
             error_text = f"⚠️ 执行出现异常（{exc_type}）：{detail[:160]}，请检查网络或模型配置后重试。"
         error_message = Message(role="assistant", content=error_text)
+        error_message.metadata["task_status"] = "error"
+        if getattr(self.orch, "_active_task_origin_id", None):
+            error_message.metadata["task_origin_id"] = self.orch._active_task_origin_id
         self.orch.history.append(error_message)
         self.orch.last_turn_status = "error"
         try:
@@ -789,6 +1108,8 @@ class AgentServer:
         msg_obj = {
             "id": error_message.id, "type": "assistant_final", "role": "agent",
             "content": error_text, "tool_calls": [], "status": "error",
+            "task_origin_id": error_message.metadata.get("task_origin_id") or "",
+            "task_status": "error",
             "session_id": sid,
             "created_at": time.strftime("%H:%M", time.localtime(error_message.created_at)),
         }
@@ -800,6 +1121,9 @@ class AgentServer:
         if not isinstance(data, dict):
             self.event_bus.broadcast(event, data)
             return
+
+        if event in SESSION_SCOPED_EVENTS and not data.get("session_id"):
+            data = {**data, "session_id": getattr(self.orch, "session_id", "") or ""}
 
         if event == "agent_state":
             if getattr(self, "_observed_model", ""):
@@ -854,6 +1178,24 @@ class AgentServer:
             data = self._record_token_usage(data)
             if data is None:
                 return
+        elif event == "turn_notice":
+            sid = getattr(self.orch, "session_id", None)
+            if not sid:
+                try:
+                    sessions = self.store.list_sessions(limit=1)
+                    if sessions:
+                        sid = sessions[0].get("session_id") or sessions[0].get("id")
+                except Exception:
+                    sid = None
+            self.event_bus.broadcast("message", {
+                "id": f"notice_{data.get('id') or int(time.time() * 1000)}",
+                "type": "assistant_notice",
+                "role": "agent",
+                "content": data.get("text", ""),
+                "status": "running",
+                "session_id": sid,
+                "created_at": time.strftime("%H:%M", time.localtime()),
+            })
         elif event == "memory_write":
             mem_item = {
                 "kind": data.get("kind", "fact"),
@@ -973,19 +1315,33 @@ class AgentServer:
         def health():
             return {"status": "ok"}
 
+        @app.route("/api/version", method="GET")
+        def version():
+            return {"version": APP_VERSION}
+
         @app.route("/api/pending_resume", method="GET")
         def pending_resume():
             """前端启动时查询：是否有未完成的任务需要提示继续/丢弃。"""
-            prompt = getattr(self, "_pending_resume_prompt", None)
+            prompt = self._current_resume_candidate()
             if prompt:
                 return {"has_pending": True, "task": prompt}
             return {"has_pending": False}
 
         @app.route("/api/dismiss_resume", method="POST")
         def dismiss_resume():
-            """用户选择丢弃未完成任务：清除提示，不恢复会话。"""
+            """用户选择不再提醒未完成任务：清除提示并持久化，重启后不再弹。"""
+            prompt = getattr(self, "_pending_resume_prompt", None) or {}
+            sid = prompt.get("session_id")
+            persisted = False
+            if sid:
+                try:
+                    persisted = self.store.mark_task_dismissed(
+                        sid, prompt.get("task_origin_id") or "")
+                except Exception:
+                    persisted = False
+                self._resume_reminded.add(sid)
             self._pending_resume_prompt = None
-            return {"ok": True}
+            return {"ok": True, "persisted": persisted}
 
         @app.route("/api/backup", method="GET")
         def api_list_backups():
@@ -1011,10 +1367,11 @@ class AgentServer:
 
         # 可切换的主模型列表（支持预设推荐、配置文件动态发现与用户自定义模型）
         PRESET_MODELS = [
-            {"id": "auto", "name": "Local Auto (127.0.0.1:53683)",
+            {"id": "auto", "name": "EchoBird", "display_name": "EchoBird",
+             "display_id": "EchoBird",
              "base_url": "http://127.0.0.1:53683/v1",
-             "desc": "本地代理服务 (EchoBird / Codex-LB) · 自动智能路由与分发",
-             "tag": "本地直连",
+             "desc": "EchoBird 智能路由 · 固定模型 auto，由本地网关自动选择真实厂商/模型",
+             "tag": "智能路由",
              "group": "recommended",
              "supports_images": True,
              "key_env": "ECHOBIRD_API_KEY", "vault_key": "echobird_api_key"},
@@ -1026,21 +1383,21 @@ class AgentServer:
              "supports_images": True,
              "key_env": "ALTEREGO_AGNES_API_KEY", "vault_key": "agnes_api_key"},
             {"id": "qwen3.8-omni-flash", "name": "Qwen 3.8 Omni Flash",
-             "base_url": "https://llm-wwautliy36g7ora8.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
              "desc": "阿里云百炼专属全模态 · 低延迟多模态识图与实时交互",
              "tag": "阿里云百炼 · 极速",
              "group": "recommended",
              "supports_images": True,
              "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
             {"id": "kimi-k3", "name": "Kimi K3",
-             "base_url": "https://llm-wwautliy36g7ora8.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
              "desc": "阿里云百炼专属网关 · 超强长上下文与深度推理",
              "tag": "深度推理",
              "group": "recommended",
              "supports_images": True,
              "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
             {"id": "qwen3.8-max", "name": "Qwen 3.8 Max",
-             "base_url": "https://llm-wwautliy36g7ora8.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
              "desc": "阿里云百炼旗舰超大多模态 · 复杂图表与高难度任务拆解",
              "tag": "超大旗舰",
              "group": "recommended",
@@ -1117,6 +1474,13 @@ class AgentServer:
             except Exception as exc:
                 logger.warning("保存 custom_models.json 异常: %s", exc)
 
+        def _model_display_name(mid: str, base_url: str = "") -> str:
+            """EchoBird 的内部 ID 固定为 auto，但 UI 只展示 EchoBird。"""
+            url = (base_url or "").lower()
+            if str(mid or "").strip().lower() == "auto" and ("53683" in url or "echobird" in url):
+                return "EchoBird"
+            return mid
+
         def _get_dynamic_models() -> list[dict]:
             """动态组装模型列表：预设模型 + 用户自定义模型 + config.yaml 中配置项 + 当前生效模型。"""
             seen_ids = set()
@@ -1164,9 +1528,12 @@ class AgentServer:
                 mid = str(scfg.get("model") or "").strip()
                 if mid and mid not in seen_ids:
                     seen_ids.add(mid)
+                    display_name = _model_display_name(mid, scfg.get("base_url") or "")
                     result.append({
                         "id": mid,
-                        "name": mid,
+                        "name": display_name,
+                        "display_name": display_name,
+                        "display_id": display_name,
                         "base_url": scfg.get("base_url") or "",
                         "desc": f"来源于配置文件：{source_name}",
                         "tag": "配置模型",
@@ -1181,10 +1548,14 @@ class AgentServer:
             current_id = self._model_name(current_llm)
             if current_id and current_id not in seen_ids:
                 seen_ids.add(current_id)
+                current_base_url = getattr(current_llm, "base_url", "")
+                current_display = _model_display_name(current_id, current_base_url)
                 result.insert(0, {
                     "id": current_id,
-                    "name": current_id,
-                    "base_url": getattr(current_llm, "base_url", ""),
+                    "name": current_display,
+                    "display_name": current_display,
+                    "display_id": current_display,
+                    "base_url": current_base_url,
                     "desc": "当前运行时生效模型",
                     "tag": "当前生效",
                     "group": "runtime",
@@ -1235,7 +1606,7 @@ class AgentServer:
             if "deepseek" in mid or "deepseek" in base_url:
                 is_specific_provider = True
                 provider_candidates.extend([("DEEPSEEK_API_KEY", "deepseek_api_key")])
-            if "echobird" in mid or "127.0.0.1:53683" in base_url or "eb-local" in mid or mid == "auto":
+            if "echobird" in mid or "127.0.0.1:53683" in base_url or "eb-local" in mid or mid in ("auto", "echobird"):
                 is_specific_provider = True
                 provider_candidates.extend([("ECHOBIRD_API_KEY", "echobird_api_key")])
             if "claude" in mid or "anthropic" in mid or "anthropic" in base_url:
@@ -1304,6 +1675,27 @@ class AgentServer:
             worker_cfg = roles_cfg.get("worker", {}) if isinstance(roles_cfg.get("worker"), dict) else {}
             sub_cfg = roles_cfg.get("subagent", {}) if isinstance(roles_cfg.get("subagent"), dict) else {}
 
+            chain_raw = self.cfg.get("llm", {}).get("fallback_chain") or main_cfg.get("fallback_chain")
+            fallback_chain = []
+            if isinstance(chain_raw, list) and chain_raw:
+                for it in chain_raw:
+                    if isinstance(it, dict) and it.get("model"):
+                        fallback_chain.append({
+                            "model": it["model"],
+                            "base_url": it.get("base_url", ""),
+                            "supports_images": it.get("supports_images", False)
+                        })
+                    elif isinstance(it, str) and it:
+                        fallback_chain.append({"model": it, "base_url": "", "supports_images": False})
+            elif fb_cfg.get("model") and fb_cfg.get("enabled", True):
+                fallback_chain = [{
+                    "model": fb_cfg.get("model"),
+                    "base_url": fb_cfg.get("base_url", ""),
+                    "supports_images": fb_cfg.get("supports_images", False)
+                }]
+            else:
+                fallback_chain = []
+
             roles_info = {
                 "main": {
                     "name": "👑 主脑 (Main Brain)",
@@ -1336,10 +1728,11 @@ class AgentServer:
                 "fallback": {
                     "name": "🛡️ 容灾兜底 (Fallback)",
                     "desc": "主模型故障或遇到速率限制时自动接管",
-                    "model": fb_cfg.get("model", "") if fb_cfg.get("enabled", True) else "",
-                    "base_url": fb_cfg.get("base_url", "") if fb_cfg.get("enabled", True) else "",
+                    "model": fallback_chain[0]["model"] if fallback_chain else (fb_cfg.get("model", "") if fb_cfg.get("enabled", True) else ""),
+                    "base_url": fallback_chain[0]["base_url"] if fallback_chain else fb_cfg.get("base_url", ""),
                     "enabled": fb_cfg.get("enabled", True),
                     "supports_images": fb_cfg.get("supports_images", False),
+                    "chain": fallback_chain,
                 }
             }
             for r in roles_info.values():
@@ -1350,7 +1743,7 @@ class AgentServer:
 
         def _persist_config_roles() -> bool:
             """将角色与模型更新安全持久化到根目录 config.yaml 中（优先保留所有注释与排版）。"""
-            cfg_path = REPO_ROOT / "config.yaml"
+            cfg_path = Path(getattr(self, "config_path", None) or (REPO_ROOT / "config.yaml"))
             if not cfg_path.is_file():
                 return False
             try:
@@ -1389,9 +1782,24 @@ class AgentServer:
                         disk_data["llm"]["fallback"]["model"] = self.cfg["llm"]["fallback"].get("model")
                         disk_data["llm"]["fallback"]["base_url"] = self.cfg["llm"]["fallback"].get("base_url")
                         disk_data["llm"]["fallback"]["enabled"] = self.cfg["llm"]["fallback"].get("enabled", True)
+                    if "fallback_chain" in self.cfg.get("llm", {}):
+                        disk_data.setdefault("llm", {})["fallback_chain"] = self.cfg["llm"]["fallback_chain"]
+                    if "fallback_chain" in self.cfg.get("models", {}).get("roles", {}).get("main", {}):
+                        disk_data.setdefault("models", {}).setdefault("roles", {}).setdefault("main", {})["fallback_chain"] = \
+                            self.cfg["models"]["roles"]["main"]["fallback_chain"]
+                    if "behavior" in self.cfg and isinstance(self.cfg["behavior"], dict):
+                        disk_data.setdefault("behavior", {})
+                        for bk, bv in self.cfg["behavior"].items():
+                            disk_data["behavior"][bk] = bv
 
                 with open(cfg_path, "w", encoding="utf-8") as f:
                     dump_func(disk_data, f)
+                    f.flush()
+                    try:
+                        import os
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
                 return True
             except Exception as exc:
                 logger.error("持久化 config.yaml 角色配置异常: %s", exc, exc_info=True)
@@ -1401,12 +1809,106 @@ class AgentServer:
         def list_models():
             """前端查询可用模型列表 + 各角色当前生效模型矩阵（动态组装与暴露）。"""
             current = self._model_name(self.llm)
+            current_base_url = getattr(self.llm, "base_url", "")
             all_models = _get_dynamic_models()
             public = [{k: v for k, v in m.items() if not k.startswith("key_") and k != "vault_key"}
                       for m in all_models]
             for m in public:
                 m["has_key"] = bool(_resolve_model_key(m))
-            return {"current": current, "models": public, "roles": _extract_roles_info()}
+            r_info = _extract_roles_info()
+            fb_chain = r_info.get("fallback", {}).get("chain") or []
+            return {
+                "current": current,
+                "current_display": _model_display_name(current, current_base_url),
+                "models": public,
+                "roles": r_info,
+                "fallback_chain": fb_chain,
+            }
+
+        @app.route("/api/settings/fallback_chain", method=["GET", "POST"])
+        def manage_fallback_chain():
+            """查询与保存多级容灾降级备用链。"""
+            from bottle import request
+            all_models = _get_dynamic_models()
+            model_map = {m["id"]: m for m in all_models}
+
+            if request.method == "POST":
+                data = request.json or {}
+                raw_chain = data.get("chain") or data.get("fallback_chain") or []
+                if not isinstance(raw_chain, list):
+                    raw_chain = [raw_chain] if raw_chain else []
+
+                new_chain = []
+                for item in raw_chain:
+                    mid = item.get("model") if isinstance(item, dict) else str(item)
+                    mid = mid.strip() if mid else ""
+                    if not mid:
+                        continue
+                    m_obj = model_map.get(mid, {})
+                    burl = (item.get("base_url") if isinstance(item, dict) else None) or m_obj.get("base_url", "")
+                    img = (item.get("supports_images") if isinstance(item, dict) else None)
+                    if img is None:
+                        img = m_obj.get("supports_images", False)
+                    new_chain.append({
+                        "model": mid,
+                        "base_url": burl,
+                        "supports_images": bool(img),
+                        "enabled": True
+                    })
+
+                self.cfg.setdefault("llm", {})["fallback_chain"] = new_chain
+                roles = self.cfg.setdefault("models", {}).setdefault("roles", {})
+                roles.setdefault("main", {})["fallback_chain"] = new_chain
+
+                if new_chain:
+                    first = new_chain[0]
+                    self.cfg["llm"]["fallback"] = {
+                        "model": first["model"],
+                        "base_url": first["base_url"],
+                        "enabled": True,
+                        "supports_images": first["supports_images"]
+                    }
+                    roles["main"].setdefault("fallback", {})
+                    roles["main"]["fallback"]["model"] = first["model"]
+                    roles["main"]["fallback"]["base_url"] = first["base_url"]
+                    roles["main"]["fallback"]["enabled"] = True
+                    roles["main"]["fallback"]["supports_images"] = first["supports_images"]
+                else:
+                    self.cfg["llm"].setdefault("fallback", {})["enabled"] = False
+                    roles.setdefault("main", {}).setdefault("fallback", {})["enabled"] = False
+
+                # 1. 优先物理落盘：第一时间同步保存到 config.yaml 并 fsync，保证瞬时关闭/重启 100% 固化
+                _persist_config_roles()
+
+                # 2. 内存热重载客户端
+                try:
+                    with self.turn_lock:
+                        self._reload_model_clients()
+                except Exception as exc:
+                    logger.warning("重新加载客户端失败: %s", exc)
+
+                self.emit_event("model_switched", {
+                    "target_role": "fallback",
+                    "model": new_chain[0]["model"] if new_chain else "",
+                    "base_url": new_chain[0]["base_url"] if new_chain else "",
+                    "fallback_chain": new_chain
+                })
+
+                return {
+                    "ok": True,
+                    "chain": new_chain,
+                    "fallback_chain": new_chain,
+                    "roles": _extract_roles_info()
+                }
+
+            # GET
+            r_info = _extract_roles_info()
+            chain = r_info.get("fallback", {}).get("chain") or []
+            return {
+                "ok": True,
+                "chain": chain,
+                "fallback_chain": chain
+            }
 
         @app.route("/api/settings/save_model_config", method="POST")
         @app.route("/api/switch_model", method="POST")
@@ -1419,11 +1921,17 @@ class AgentServer:
                 return {"ok": False, "error": "模型标识不能为空"}
 
             target_role = str(data.get("target_role") or data.get("role") or "main").strip().lower()
-            if target_role not in {"main", "worker", "subagent", "planner", "fallback", "all"}:
+            if target_role not in {"main", "worker", "subagent", "planner", "fallback", "all", "none"}:
                 target_role = "main"
 
             base_url = str(data.get("base_url") or "").strip()
             api_key = str(data.get("api_key") or "").strip()
+
+            # UI 展示名是 EchoBird，但配置与真实请求始终使用内部 ID auto。
+            if model_id.lower() == "echobird" and (
+                "53683" in base_url.lower() or "echobird" in base_url.lower()
+            ):
+                model_id = "auto"
 
             # 1. 如果用户录入了新的 API Key，立即使用 Windows DPAPI 加密存入 Vault
             vault = getattr(self, "vault", None)
@@ -1489,28 +1997,53 @@ class AgentServer:
                     custom_list.append(target)
                     _save_custom_models(custom_list)
             else:
+                updated_custom = False
+                new_name = data.get("name") or data.get("display_name")
                 if base_url and base_url != target.get("base_url"):
                     target["base_url"] = base_url
-                    if target.get("is_custom"):
-                        custom_list = _load_custom_models()
-                        for c in custom_list:
-                            if c.get("id") == model_id:
+                    updated_custom = True
+                if new_name and new_name != target.get("name"):
+                    target["name"] = new_name
+                    target["display_name"] = new_name
+                    updated_custom = True
+                if target.get("is_custom") and updated_custom:
+                    custom_list = _load_custom_models()
+                    for c in custom_list:
+                        if c.get("id") == model_id:
+                            if base_url:
                                 c["base_url"] = base_url
-                        _save_custom_models(custom_list)
+                            if new_name:
+                                c["name"] = new_name
+                                c["display_name"] = new_name
+                    _save_custom_models(custom_list)
 
             # 解析目标模型的 key，没有 key 直接报错不切换
             model_key = api_key or _resolve_model_key(target)
             if not model_key:
-                return {
-                    "ok": False,
-                    "error": f"模型 {model_id} 没有可用 API Key，请在下方录入密钥后保存"
-                }
+                is_local = any(h in base_url for h in ("127.0.0.1", "localhost", "0.0.0.0", "53683"))
+                if data.get("no_key") or is_local or target.get("group") == "local" or target.get("id") == "auto":
+                    model_key = "eb-local-no-key"
+                else:
+                    return {
+                        "ok": False,
+                        "error": f"模型 {model_id} 没有可用 API Key，请在下方录入密钥后保存"
+                    }
 
             # 2. 按角色分级更新配置字典
             roles = self.cfg.setdefault("models", {}).setdefault("roles", {})
             supports_img = bool(target.get("supports_images", True))
 
-            if target_role == "worker":
+            if target_role == "none":
+                if self._model_name(self.llm) == target["id"]:
+                    self.cfg.setdefault("llm", {})["base_url"] = target["base_url"]
+                    roles.setdefault("main", {})["base_url"] = target["base_url"]
+                    try:
+                        with self.turn_lock:
+                            self._reload_model_clients(api_key_override=model_key)
+                    except Exception as exc:
+                        logger.warning("重载当前模型客户端异常: %s", exc)
+                    _persist_config_roles()
+            elif target_role == "worker":
                 roles.setdefault("worker", {})["model"] = target["id"]
                 roles["worker"]["base_url"] = target["base_url"]
                 roles["worker"]["supports_images"] = bool(data.get("supports_images", False))
@@ -1540,6 +2073,13 @@ class AgentServer:
                 roles["main"]["fallback"]["base_url"] = target["base_url"]
                 roles["main"]["fallback"]["enabled"] = True
                 roles["main"]["fallback"]["supports_images"] = False
+                chain = self.cfg.setdefault("llm", {}).setdefault("fallback_chain", [])
+                if chain:
+                    chain[0]["model"] = target["id"]
+                    chain[0]["base_url"] = target["base_url"]
+                else:
+                    chain.append({"model": target["id"], "base_url": target["base_url"], "enabled": True})
+                roles["main"]["fallback_chain"] = chain
                 try:
                     with self.turn_lock:
                         self._reload_model_clients()
@@ -1574,11 +2114,12 @@ class AgentServer:
                     return {"ok": False, "error": str(exc)}
 
             # 3. 持久化到 config.yaml
-            if not _persist_config_roles():
-                logger.warning("模型已在内存中热切换生效，但写入 config.yaml 失败，重启后将恢复旧配置")
+            if target_role != "none":
+                if not _persist_config_roles():
+                    logger.warning("模型已在内存中热切换生效，但写入 config.yaml 失败，重启后将恢复旧配置")
 
-            if target_role in ("main", "all"):
-                self.state_snapshot["status"]["current_model"] = target["id"]
+                if target_role in ("main", "all"):
+                    self.state_snapshot["status"]["current_model"] = target["id"]
 
             self.emit_event("model_switched", {
                 "target_role": target_role,
@@ -1738,20 +2279,26 @@ class AgentServer:
                 "roles": _extract_roles_info(),
             }
 
+        def _no_cache(res):
+            res.set_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            res.set_header("Pragma", "no-cache")
+            res.set_header("Expires", "0")
+            return res
+
         # 静态文件
         @app.route("/")
         def index():
-            return static_file("index.html", root=str(UI_DIR))
+            return _no_cache(static_file("index.html", root=str(UI_DIR)))
 
         @app.route("/takeover")
         @app.route("/takeover.html")
         def takeover():
-            return static_file("takeover.html", root=str(UI_DIR))
+            return _no_cache(static_file("takeover.html", root=str(UI_DIR)))
 
         @app.route("/settings")
         @app.route("/settings.html")
         def settings_page():
-            return static_file("settings.html", root=str(UI_DIR))
+            return _no_cache(static_file("settings.html", root=str(UI_DIR)))
 
         @app.route("/api/open_settings_window", method=["GET", "POST"])
         def open_settings_window():
@@ -1767,7 +2314,7 @@ class AgentServer:
 
         @app.route("/static/<filepath:path>")
         def server_static(filepath):
-            return static_file(filepath, root=str(UI_DIR / "static"))
+            return _no_cache(static_file(filepath, root=str(UI_DIR / "static")))
 
         @app.route("/uploads/<filepath:path>")
         def get_upload(filepath):
@@ -1849,14 +2396,6 @@ class AgentServer:
                             "awaiting_approval": "/avatar/dragon/waiting.gif",
                             "done": "/avatar/dragon/done.gif",
                         }
-                    },
-                    {
-                        "id": "otter",
-                        "name": "水獭 (Otter)",
-                        "desc": "经典原版 · 活泼灵动",
-                        "icon": "🦦",
-                        "preview": "",
-                        "states": {}
                     }
                 ]
             }
@@ -1915,20 +2454,34 @@ class AgentServer:
         # 2.1 会话接口
         @app.route("/api/sessions", method="GET")
         def list_sessions():
+            # 排序与更新时间都取最近一条消息：微信任务会在后台持续写入，
+            # 只按 start_ts 排会让活跃的微信会话沉底、前端列表也看不出动静。
             rows = self.store.db.execute(
-                "SELECT session_id, title, started_ts FROM sessions ORDER BY started_ts DESC"
+                "SELECT s.session_id, s.title, s.started_ts,"
+                " COALESCE((SELECT MAX(m.created_at) FROM messages m"
+                "           WHERE m.session_id = s.session_id), s.started_ts) AS last_ts,"
+                " (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.session_id) AS msg_count"
+                " FROM sessions s ORDER BY last_ts DESC"
             ).fetchall()
             if not rows:
                 sid = self.store.new_session("默认会话")
-                rows = [(sid, "默认会话", time.time())]
-            return json.dumps([
-                {
-                    "id": r[0],
-                    "title": r[1] or "会话",
-                    "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[2])),
-                }
-                for r in rows
-            ])
+                rows = [(sid, "默认会话", time.time(), time.time(), 0)]
+            items = []
+            for sid, title, started_ts, last_ts, msg_count in rows:
+                # 微信通道的会话 id 固定为 s-wx-*，标题也可能被历史首条消息覆盖，
+                # 两者任一命中都算微信来源，供前端打标签、分流未读。
+                source = "weixin" if (str(sid).startswith("s-wx-")
+                                      or str(title or "").startswith("微信")) else "desktop"
+                items.append({
+                    "id": sid,
+                    "title": title or "会话",
+                    "updated_at": time.strftime(
+                        "%Y-%m-%d %H:%M", time.localtime(last_ts or started_ts)),
+                    "last_ts": int((last_ts or started_ts or 0) * 1000),
+                    "message_count": int(msg_count or 0),
+                    "source": source,
+                })
+            return json.dumps(items)
 
         @app.route("/api/sessions", method="POST")
         def create_session():
@@ -1995,10 +2548,33 @@ class AgentServer:
                 # B7: 历史记录过滤潜在密钥
                 if content:
                     content = self.vault.scrub(content)
+                task_goal = ""
+                task_origin_id = ""
+                task_status = ""
+                if m.role == "user":
+                    metadata = m.metadata or {}
+                    task_goal = metadata.get("task_goal") or ""
+                    if isinstance(task_goal, str) and task_goal and self.vault:
+                        task_goal = self.vault.scrub(task_goal)
+                    task_origin_id = metadata.get("task_origin_id") or m.id
+                elif m.role == "assistant":
+                    metadata = m.metadata or {}
+                    task_goal = metadata.get("task_goal") or ""
+                    if isinstance(task_goal, str) and task_goal and self.vault:
+                        task_goal = self.vault.scrub(task_goal)
+                    task_origin_id = metadata.get("task_origin_id") or ""
+                    task_status = metadata.get("task_status") or ""
 
-                # 区分消息类型：user, assistant_final, tool_step
-                msg_type = "user" if m.role == "user" else ("assistant_final" if content else "tool_step")
-                if not content and not tool_calls_info and m.role == "assistant":
+                # 区分消息类型：user / assistant_notice（system 通知）/ assistant_final / tool_step
+                if m.role == "user":
+                    msg_type, ui_role = "user", "user"
+                elif m.role == "system":
+                    msg_type, ui_role = "assistant_notice", "agent"
+                elif content:
+                    msg_type, ui_role = "assistant_final", "agent"
+                else:
+                    msg_type, ui_role = "tool_step", "agent"
+                if not content and not tool_calls_info and m.role in ("assistant", "system"):
                     continue
 
                 created_ts = getattr(m, "created_at", None) or time.time()
@@ -2006,12 +2582,26 @@ class AgentServer:
                 ui_messages.append({
                     "id": mid,
                     "type": msg_type,
-                    "role": "agent" if m.role == "assistant" else "user",
+                    "role": ui_role,
                     "content": content,
+                    "task_goal": task_goal,
+                    "task_origin_id": task_origin_id,
+                    "task_status": task_status,
                     "tool_calls": tool_calls_info,
                     "created_at": time.strftime("%H:%M", time.localtime(created_ts)),
                 })
             return json.dumps(ui_messages)
+
+        # 2.1.1 停止当前任务（含全部子任务）
+        @app.route("/api/stop", method="POST")
+        def stop_task():
+            try:
+                self.orch.request_stop()
+                return {"ok": True, "message": "停止指令已发送"}
+            except Exception as e:
+                logger.warning("Stop request failed: %s", e)
+                response.status = 500
+                return {"ok": False, "error": str(e)}
 
         # 2.2 聊天接口
         @app.route("/api/chat", method="POST")
@@ -2029,6 +2619,8 @@ class AgentServer:
             with self._conversation_turn(sid):
                 # 恢复会话历史
                 self.orch.history = self.store.load_history(sid)
+                # 重启遗留任务提醒：只在新话题时注入一次，进 system prompt 不落库
+                resume_notice = self._resume_notice_text(sid, content)
 
                 # 自动基于第一条用户消息更新会话标题
                 if not self.orch.history:
@@ -2092,7 +2684,14 @@ class AgentServer:
 
                 try:
                     self.memory.maybe_remember(content)
-                    raw_reply = self.orch.handle(user_msg)
+                    ctx = getattr(self.orch, "ctx", None)
+                    if ctx is not None:
+                        ctx.turn_notice = resume_notice
+                    try:
+                        raw_reply = self.orch.handle(user_msg)
+                    finally:
+                        if ctx is not None:
+                            ctx.turn_notice = ""
                     reply_text = self.vault.scrub(raw_reply)
 
                     # 持久化更新后的会话历史
@@ -2113,6 +2712,8 @@ class AgentServer:
                         rec_copy["result_summary"] = res_sum
                         tool_calls.append(rec_copy)
 
+                    last_meta = (getattr(self.orch.history[-1], "metadata", {})
+                                 if self.orch.history else {})
                     msg_obj = {
                         "id": f"msg_{int(time.time()*1000)}",
                         "type": "assistant_final" if reply_text else "tool_step",
@@ -2120,6 +2721,10 @@ class AgentServer:
                         "content": reply_text,
                         "tool_calls": tool_calls,
                         "status": getattr(self.orch, "last_turn_status", "done"),
+                        "task_origin_id": last_meta.get("task_origin_id") or "",
+                        "task_goal": last_meta.get("task_goal") or "",
+                        "task_status": last_meta.get("task_status")
+                                        or getattr(self.orch, "last_turn_status", "done"),
                         "session_id": sid,
                         "created_at": time.strftime("%H:%M", time.localtime(time.time())),
                     }
@@ -2134,6 +2739,7 @@ class AgentServer:
                                 memory=self.memory,
                                 store=self.store,
                                 tracer=self.tracer,
+                                experience_store=self.experience,
                                 scope="session",
                                 session_id=session_id,
                                 vault=self.vault,
@@ -2374,6 +2980,31 @@ class AgentServer:
                 })
             return json.dumps(tasks)
 
+        @app.route("/api/usage", method="GET")
+        def get_usage():
+            """返回 Token 消耗及折算花费看板统计数据。支持 ?range=7 / 30 / all。"""
+            raw_range = (request.query.get("range") or "30").strip().lower()
+            if raw_range in ("all", "0", "max"):
+                range_days = 0
+            else:
+                try:
+                    range_days = int(raw_range)
+                except (ValueError, TypeError):
+                    range_days = 30
+
+            if hasattr(self, "store") and self.store:
+                data = self.store.get_token_usage_stats(range_days=range_days)
+            else:
+                data = {
+                    "summary": {
+                        "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
+                        "requests": 0, "total_cost": 0.0, "total_cost_formatted": "¥0.00"
+                    },
+                    "range": range_days, "days": [], "models": []
+                }
+            response.content_type = "application/json; charset=utf-8"
+            return json.dumps(data, ensure_ascii=False)
+
         # 2.5 接管接口
         @app.route("/api/takeover/<tid>/status", method="GET")
         def takeover_status(tid):
@@ -2475,12 +3106,19 @@ class AgentServer:
             has_llm_key = self.vault.has("llm_api_key") or has_cur_key
             has_backup_key = self.vault.has("backup_llm_api_key")
             provider_keys = {}
-            router_cfg = self.cfg.get("llm_router", {})
+            router_cfg = self.cfg.get("llm_router") or {}
             if router_cfg.get("enabled"):
                 for provider in router_cfg.get("providers", {}):
                     provider_keys[provider] = self.vault.has(f"{provider}_api_key")
                 has_llm_key = has_llm_key or any(provider_keys.values())
                 has_backup_key = has_backup_key or sum(provider_keys.values()) > 1
+            beh = self.cfg.get("behavior") or {}
+            beh_info = {
+                "approval_timeout_sec": int(beh.get("approval_timeout_sec", getattr(self.approval, "timeout_sec", 180))),
+                "hazardous_default_scope": str(beh.get("hazardous_default_scope", "session")),
+                "tray_resident": bool(beh.get("tray_resident", True)),
+                "auto_failover": bool(beh.get("auto_failover", True)),
+            }
             return {
                 "model": cur_model,
                 "base_url": cur_base_url,
@@ -2495,6 +3133,47 @@ class AgentServer:
                 "sessions_count": sess_count,
                 "approvals_stats": appr_stats,
                 "tools_count": len(self.registry._tools),
+                "behavior": beh_info,
+            }
+
+        @app.route("/api/settings/behavior", method=["GET", "POST"])
+        def manage_behavior_settings():
+            """查询与修改行为设置（审批超时、危险动作默认粒度、托盘常驻、自动降级）。"""
+            from bottle import request
+            beh = self.cfg.setdefault("behavior", {})
+            if request.method == "POST":
+                data = request.json or {}
+                if "approval_timeout_sec" in data:
+                    try:
+                        t_val = int(data["approval_timeout_sec"])
+                        if t_val > 0:
+                            beh["approval_timeout_sec"] = t_val
+                            self.approval.timeout_sec = t_val
+                    except (ValueError, TypeError):
+                        pass
+                if "hazardous_default_scope" in data:
+                    sc = str(data["hazardous_default_scope"]).strip().lower()
+                    if sc in {"once", "session", "always"}:
+                        beh["hazardous_default_scope"] = sc
+                if "tray_resident" in data:
+                    beh["tray_resident"] = bool(data["tray_resident"])
+                if "auto_failover" in data:
+                    af = bool(data["auto_failover"])
+                    beh["auto_failover"] = af
+                    if "llm" in self.cfg and "fallback" in self.cfg["llm"]:
+                        self.cfg["llm"]["fallback"]["enabled"] = af
+                    if hasattr(self.llm, "fallback") and self.llm.fallback:
+                        setattr(self.llm.fallback, "enabled", af)
+                _persist_config_roles()
+
+            return {
+                "ok": True,
+                "behavior": {
+                    "approval_timeout_sec": int(beh.get("approval_timeout_sec", getattr(self.approval, "timeout_sec", 180))),
+                    "hazardous_default_scope": str(beh.get("hazardous_default_scope", "session")),
+                    "tray_resident": bool(beh.get("tray_resident", True)),
+                    "auto_failover": bool(beh.get("auto_failover", True)),
+                }
             }
 
         @app.route("/api/settings/test_llm", method="POST")
@@ -2507,16 +3186,28 @@ class AgentServer:
             test_base_url = str(data.get("base_url") or "").strip()
             test_api_key = str(data.get("api_key") or "").strip()
 
+            final_model = test_model or self._model_name(self.llm)
+            final_base_url = test_base_url or getattr(self.llm, "base_url", "")
+            is_echobird = (
+                "53683" in (final_base_url or "")
+                or "echobird" in (final_base_url or "").lower()
+            )
+            # 允许前端在输入框中展示 EchoBird，但真实请求仍固定使用 auto。
+            if is_echobird and final_model.lower() == "echobird":
+                final_model = "auto"
+
             target_client = self.llm
             if test_model or test_base_url or test_api_key:
-                final_model = test_model or self._model_name(self.llm)
-                final_base_url = test_base_url or getattr(self.llm, "base_url", "")
                 final_key = test_api_key or _resolve_model_key({"id": final_model, "base_url": final_base_url})
                 if not final_key:
-                    return {
-                        "status": "error",
-                        "message": f"模型 [{final_model}] 尚未配置专属 API Key，请在下方「API Key 访问密钥」输入框中填入您的密钥后，再点击连通性测试或保存"
-                    }
+                    is_local = any(h in (final_base_url or "") for h in ("127.0.0.1", "localhost", "53683"))
+                    if is_local or final_model == "auto":
+                        final_key = "eb-local-no-key"
+                    else:
+                        return {
+                            "status": "error",
+                            "message": f"模型 [{final_model}] 尚未配置专属 API Key，请在下方「API Key 访问密钥」输入框中填入您的密钥后，再点击连通性测试或保存"
+                        }
                 from agent.llm import LLMClient
                 target_client = LLMClient(
                     base_url=final_base_url,
@@ -2527,11 +3218,26 @@ class AgentServer:
 
             try:
                 res = target_client.chat([Message(role="user", content="连通性测试，请回复OK")])
-                return {"status": "ok", "reply": res.content}
+                payload = {"status": "ok", "reply": res.content}
+                route_info = target_client.get_echobird_route_info() if hasattr(target_client, "get_echobird_route_info") else None
+                if route_info:
+                    probe = route_info.get("probe") or {}
+                    last_route = route_info.get("last_route") or {}
+                    route = last_route or probe.get("route") or {}
+                    if route:
+                        payload["route"] = route.get("display_name") or route.get("route_key")
+                        payload["route_detail"] = route
+                    payload["echobird"] = route_info
+                    payload["capabilities"] = route_info.get("capabilities")
+                return payload
             except Exception as e:
                 err_str = str(e)
                 if "401" in err_str or "Invalid token" in err_str or "AuthenticationError" in err_str or "Unauthorized" in err_str:
-                    msg = f"API Key 认证失败 (401 Invalid Token / 密钥无效或未授权)。请检查在下方填入的 API Key 是否为该模型所属厂商颁发的有效密钥。"
+                    if is_echobird:
+                        msg = ("EchoBird Key 认证失败 (401/403)。请检查设置中的 EchoBird 密钥，"
+                               "或环境变量 ECHOBIRD_API_KEY 是否有效。")
+                    else:
+                        msg = f"API Key 认证失败 (401 Invalid Token / 密钥无效或未授权)。请检查在下方填入的 API Key 是否为该模型所属厂商颁发的有效密钥。"
                 elif "404" in err_str or "Not Found" in err_str:
                     msg = f"API 端点路径不存在 (404 Not Found)。请检查 API Base URL 是否为 OpenAI 兼容的 /v1 路径（例如 https://apihub.agnes-ai.com/v1）。"
                 elif "ConnectError" in err_str or "Failed to establish" in err_str or "timeout" in err_str.lower():
@@ -2569,27 +3275,48 @@ class AgentServer:
                     if hasattr(win, "minimize"):
                         win.minimize()
                 elif action == "maximize":
-                    is_max = getattr(win, "maximized", False) or getattr(win, "state", None) == "maximized"
-                    if is_max:
+                    # D8 修复：pywebview 的 win.maximized 运行时不更新、win.state 是响应式字典，
+                    # 旧判据恒 False 导致最大化后永远无法还原；改用 events.maximized/restored 维护的标志
+                    if getattr(self, "_win_is_max", False):
                         if hasattr(win, "restore"):
                             win.restore()
-                    else:
-                        if hasattr(win, "maximize"):
-                            win.maximize()
+                        self._win_is_max = False
+                    elif hasattr(win, "maximize"):
+                        win.maximize()
+                        self._win_is_max = True
                 elif action == "close":
-                    if hasattr(win, "destroy"):
-                        win.destroy()
+                    # 浮窗触发（v1.1.7 需求，v1.1.14 修正）：❌ 一律 = 隐藏主窗口 + 弹浮窗（无论是否有任务）；
+                    # 退出只走托盘/浮窗菜单的「退出」（/api/exit）。
+                    self._ulog("❌ 关闭点击：active_turn=%s → 隐藏主窗口并弹浮窗" % self._has_active_turn())
+                    if hasattr(win, "hide"):
+                        win.hide()
+                    proc = self._spawn_float_window()
+                    self._ulog("浮窗子进程: %s" % (getattr(proc, "pid", "启动失败")))
+                    return {"ok": True, "action": action, "hidden": True}
+                elif action == "show":
+                    # 浮窗「打开主窗口」：主窗口最小化/隐藏时恢复显示
+                    if hasattr(win, "show"):
+                        win.show()
+                    if hasattr(win, "restore"):
+                        win.restore()
                 return {"ok": True, "action": action}
             except Exception as e:
                 logger.warning("[window_control] 操作失败 %s: %s", action, e)
                 return {"ok": False, "error": str(e)}
+
+        @app.route("/api/exit", method="POST")
+        def exit_app():
+            """真正退出（浮窗「退出」菜单调用）：销毁可能隐藏的主窗口并停服。"""
+            self._really_exit()
+            return {"ok": True}
 
         @app.route("/api/window/status", method="GET")
         def window_status():
             win = getattr(self, "_ui_window", None)
             if not win:
                 return {"is_desktop": False, "maximized": False}
-            is_max = getattr(win, "maximized", False) or getattr(win, "state", None) == "maximized"
+            # D8 修复：与 /api/window/control 共用 events.maximized/restored 维护的标志
+            is_max = getattr(self, "_win_is_max", False)
             return {"is_desktop": True, "maximized": bool(is_max)}
 
         # 2.8 记忆库接口

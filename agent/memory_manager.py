@@ -5,9 +5,40 @@ M2 先做规则版 maybe_remember（用户说"记住"就记）。
 """
 from __future__ import annotations
 
+import difflib
+import os
 import re
+import tempfile
+import threading
 import time
 from pathlib import Path
+
+
+_MEMORY_LOCK = threading.RLock()
+_META_SUFFIX_RE = re.compile(r"[（(]\d{4}-\d{2}-\d{2}[^）)]*[）)]\s*$")
+_VALUE_RE = re.compile(
+    r"\d+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|https?://\S+", re.IGNORECASE)
+
+
+def _claim_body(line: str) -> str:
+    text = line.strip()
+    if text.startswith(("- ", "* ")):
+        text = text[2:].strip()
+    text = _META_SUFFIX_RE.sub("", text).strip()
+    return re.sub(r"\s+", "", text).casefold()
+
+
+def _claim_score(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    if set(_VALUE_RE.findall(left)) != set(_VALUE_RE.findall(right)):
+        return 0.0
+    shorter, longer = sorted((left, right), key=len)
+    if len(shorter) >= 8 and shorter in longer:
+        return 0.95
+    return difflib.SequenceMatcher(None, left, right).ratio()
 
 
 class MemoryManager:
@@ -55,6 +86,10 @@ class MemoryManager:
 
     def maybe_remember(self, user_text: str) -> str | None:
         """规则版：用户明确说记住/别忘/偏好时记。返回记下的 claim 或 None。"""
+        with _MEMORY_LOCK:
+            return self._maybe_remember_locked(user_text)
+
+    def _maybe_remember_locked(self, user_text: str) -> str | None:
         t = user_text.strip()
         m = re.match(r"^(记住|请记住|别忘了|记一下)[：:，, ]?(.+)$", t)
         if m:
@@ -78,44 +113,75 @@ class MemoryManager:
         return claim
 
     def _is_duplicate(self, claim: str) -> bool:
-        text = self.main.read_text(encoding="utf-8")
-        key = re.sub(r"[^\w]", "", claim)[:12]
-        return key in re.sub(r"[^\w]", "", text)
+        target = _claim_body(claim)
+        if not target:
+            return False
+        with _MEMORY_LOCK:
+            text = self.main.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if not line.strip().startswith(("- ", "* ")):
+                continue
+            if _claim_score(target, _claim_body(line)) >= 0.84:
+                return True
+        return False
 
     def remove_claim(self, claim: str) -> bool:
-        """从 MEMORY.md 中删除包含指定 claim 关键词的旧条目（用于旧条目纠正）。"""
+        """删除与 claim 最相似的一条旧记忆（用于旧条目纠正）。"""
         if not self.main.exists():
             return False
-        text = self.main.read_text(encoding="utf-8")
-        clean_target = re.sub(r"[^\w]", "", claim)
-        if not clean_target:
+        target = _claim_body(claim)
+        if not target:
             return False
+        with _MEMORY_LOCK:
+            text = self.main.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            best_idx, best_score = -1, 0.0
+            for idx, line in enumerate(lines):
+                if not line.strip().startswith(("- ", "* ")):
+                    continue
+                score = _claim_score(target, _claim_body(line))
+                if score > best_score:
+                    best_idx, best_score = idx, score
+            if best_idx < 0 or best_score < 0.82:
+                return False
+            del lines[best_idx]
+            self._atomic_write("\n".join(lines).rstrip() + "\n")
+            return True
 
-        lines = text.splitlines()
-        new_lines = []
-        removed = False
-        for line in lines:
-            if line.strip().startswith("- ") and clean_target in re.sub(r"[^\w]", "", line):
-                removed = True
-                continue
-            new_lines.append(line)
-
-        if removed:
-            self.main.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-        return removed
+    def _atomic_write(self, text: str):
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.dir), prefix=".MEMORY.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+            os.replace(tmp_path, self.main)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _append(self, category: str, claim: str, source: str = "用户说明"):
-        text = self.main.read_text(encoding="utf-8")
-        stamp = time.strftime("%Y-%m-%d")
-        line = f"- {claim}（{stamp} {source}）\n"
-        if f"## {category}" in text:
-            text = text.replace(f"## {category}", f"## {category}\n{line}", 1)
-        else:
-            text += f"\n## {category}\n{line}"
-        self.main.write_text(text, encoding="utf-8")
+        from vault.manager import Vault
+        claim = Vault.scrub_text(claim)
+        with _MEMORY_LOCK:
+            if self._is_duplicate(claim):
+                return
+            text = self.main.read_text(encoding="utf-8")
+            stamp = time.strftime("%Y-%m-%d")
+            line = f"- {claim}（{stamp} {source}）\n"
+            if f"## {category}" in text:
+                text = text.replace(f"## {category}", f"## {category}\n{line}", 1)
+            else:
+                text += f"\n## {category}\n{line}"
+            self._atomic_write(text)
 
     def append_daily(self, text: str):
         """流水账追加到今日文件。"""
+        from vault.manager import Vault
+        text = Vault.scrub_text(text)
         p = self.dir / f"{time.strftime('%Y-%m-%d')}.md"
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(f"\n## {time.strftime('%H:%M')}\n{text}\n")
+        with _MEMORY_LOCK:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(f"\n## {time.strftime('%H:%M')}\n{text}\n")

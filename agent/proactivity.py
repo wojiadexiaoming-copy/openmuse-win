@@ -36,10 +36,17 @@ class ProactivityStore:
 
     def __init__(self, path: str | None = None):
         if path is None:
-            path = os.path.join(os.path.expanduser("~"), ".alterego",
-                                 "proactivity", "pending.json")
+            try:
+                from agent.paths import resolve_sub_dir
+                path = str(resolve_sub_dir("proactivity", "pending.json"))
+            except Exception:
+                path = os.path.join(os.path.expanduser("~"), ".alterego",
+                                     "proactivity", "pending.json")
         self.path = path
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except (PermissionError, OSError):
+            pass
 
     def _load(self) -> list[dict]:
         try:
@@ -173,11 +180,17 @@ def make_proactivity_tools(store: "ProactivityStore"):
                                            "enum": ["high", "medium", "low"]}},
                          "required": ["topic", "one_liner"]},
             func=_add,
+            parallel_safe=False,
+            is_readonly=False,
+            cacheable=False,
         ),
         ToolDefinition(
             name="proactivity_pending",
             description="查看待推送候选列表。",
             parameters={"type": "object", "properties": {}, "required": []},
             func=_pending,
+            parallel_safe=True,
+            is_readonly=True,
+            cacheable=False,
         ),
     ]

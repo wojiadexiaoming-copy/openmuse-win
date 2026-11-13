@@ -200,6 +200,8 @@ def test_cookie_login_import():
     assert "共 1 个" in out
     assert ".example.com" in out
     assert "abc123" not in out  # 值不落日志
+    assert "名称: sessionid" in out
+    assert "不能单凭它判定登录态" in out
 
 
 def test_cookie_import_bad_format():

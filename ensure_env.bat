@@ -28,6 +28,21 @@ if errorlevel 1 (
 set "VENV="
 set "FRESH="
 
+rem 0) Local venv on fast local SSD (recommended for network/SMB drives like H:\)
+if defined ALTER_LOCAL_VENV (
+    if not defined LOCALAPPDATA set "LOCALAPPDATA=%USERPROFILE%\AppData\Local"
+    set "LOCAL_VENV_PATH=%LOCALAPPDATA%\AlterEgo\venv-%COMPUTERNAME%"
+    if exist "%LOCAL_VENV_PATH%\Scripts\python.exe" (
+        "%LOCAL_VENV_PATH%\Scripts\python.exe" -c "pass" >nul 2>nul
+        if not errorlevel 1 (
+            set "VENV=%LOCAL_VENV_PATH%"
+            goto :check_deps
+        )
+    )
+    set "VENV=%LOCAL_VENV_PATH%"
+    goto :create_venv
+)
+
 rem 1) Machine-specific venv (the normal case)
 if exist ".venv-%COMPUTERNAME%\Scripts\python.exe" (
     ".venv-%COMPUTERNAME%\Scripts\python.exe" -c "pass" >nul 2>nul
@@ -61,6 +76,7 @@ exit /b 1
 
 :do_create
 echo [env] Creating %VENV% with "%PYCMD%" ...
+for %%I in ("%VENV%") do if not exist "%%~dpI" mkdir "%%~dpI" 2>nul
 %PYCMD% -m venv "%VENV%"
 if errorlevel 1 (
     echo [env] ERROR: failed to create the virtual environment.
@@ -89,7 +105,7 @@ rem uv-style venv: no pip inside -> reuse uv when available
 where uv >nul 2>nul
 if not errorlevel 1 (
     echo [env] pip is not available in this venv; using uv instead.
-    uv pip install %PIP_INDEX_ARG% --python "%CD%\%VENV%\Scripts\python.exe" -r requirements.txt
+    uv pip install %PIP_INDEX_ARG% --python "%VENV%\Scripts\python.exe" -r requirements.txt
     if errorlevel 1 (
         echo [env] ERROR: uv pip install failed. Check network and re-run.
         exit /b 1

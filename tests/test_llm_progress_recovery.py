@@ -47,7 +47,7 @@ class FakeRegistry:
     def end_turn(self):
         self.closed += 1
 
-    def execute(self, name, args):
+    def execute(self, name, args, _provenance=None):
         self.executed.append((name, dict(args)))
         if name == "desktop_type":
             return typed_result(submitted=self.submitted)

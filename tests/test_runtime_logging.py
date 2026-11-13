@@ -49,6 +49,7 @@ def runtime_server(tmp_path, monkeypatch):
     server.orch = SimpleNamespace(history=[], last_turn_tool_records=[], last_turn_status="running")
     server.memory = SimpleNamespace(maybe_remember=lambda value: None)
     server.vault = SimpleNamespace(scrub=lambda value: value)
+    server.data_dir = tmp_path
     server.store = SessionStore(str(tmp_path / "conversations.db"))
     server.tracer = Tracer(str(tmp_path / "spans.db"))
     server.event_bus = EventBus()
@@ -182,6 +183,7 @@ def test_weixin_failure_persists_partial_history_and_diagnostic(tmp_path, monkey
     channel = WeixinChannel(
         data_dir=tmp_path / "channel", orch=orch, session_store=store,
         tracer=tracer, on_event=lambda event, data: events.append((event, data)))
+    channel.weixin_session_id = sid
     channel.client = MagicMock()
     monkeypatch.setattr("channels.weixin.threading.Thread", _ImmediateThread)
 

@@ -107,6 +107,34 @@ def test_storage_local():
     assert "token = tok_12345" in out
 
 
+def test_storage_cookies_name_filter_and_httponly():
+    w = make_worker()
+    w._raw_page._cookies = [
+        {"name": "sessionid", "value": "abc123xyz789secret", "domain": ".example.com", "httpOnly": True},
+        {"name": "_ga", "value": "GA1.2.3", "domain": ".example.com"},
+    ]
+    out = w._do_storage({"action": "cookies", "name": "session"})
+    assert "sessionid" in out
+    assert "[HttpOnly]" in out
+    assert "_ga" not in out
+    assert "登录态以页面 UI" in out
+
+
+def test_storage_cookie_filter_miss_is_not_logout_proof():
+    w = make_worker()
+    out = w._do_storage({"action": "cookies", "name": "not_there"})
+    assert "不能作为" in out
+    assert "未登录" in out
+
+
+def test_storage_cookies_truncation_warns():
+    w = make_worker()
+    w._raw_page._cookies = [
+        {"name": f"c{i}", "value": "v" * 20, "domain": ".example.com"} for i in range(45)]
+    out = w._do_storage({"action": "cookies"})
+    assert "仅列出前 40 个，共 45 个" in out
+
+
 def test_press():
     w = make_worker()
     out = w._do_press({"key": "Enter"})

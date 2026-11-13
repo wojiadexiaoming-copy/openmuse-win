@@ -57,6 +57,19 @@ context:
 
 agent:
   max_iters: 25          # §5.2 防无限循环
+  max_iters_hard: 100    # 硬上限：防跑飞的绝对天花板
+  step_grant: 10         # 主 Agent 按真实进展增量续杯（0=一次跳到硬上限）
+  max_turn_wall_clock_sec: 600   # 主 Agent 单条消息墙钟初始上限（秒）
+  turn_extension_sec: 180        # 有真实进展时每次续期秒数
+  turn_max_extensions: 3         # 最多续期次数（0=到点即收尾）
+  # 子 Agent 动态步数预算：软上限到后按“新信息/多样化签名/失败不累积”增量续杯
+  subagent_max_iters: 20
+  subagent_max_iters_hard: 60
+  subagent_step_grant: 10
+  subagent_max_turn_sec: 300   # 子 Agent 单轮墙钟初始上限
+  subagent_turn_extension_sec: 120  # 子 Agent 有进展时的续期秒数
+  subagent_max_extensions: 2     # 子 Agent 最多续期次数
+  skill_review_sessions: 60     # 夜间技能评审扫描的最近会话数
   workspace: "."          # file_* 工具允许的根目录（防跑出界）
   parallel_tools: false   # M4 §5.5 工具并行（默认关，串行更稳）
   task_tracker: true      # §31.6 任务进度后端（无 UI 时只记录不展示）
@@ -78,3 +91,37 @@ tools:
 llm_router:
   enabled: false
   providers_file: docs/model-api-guide/llm_providers.yaml
+
+desktop:
+  enabled: true
+  safe_mode: true         # 危险操作需人机确认
+  takeover_timeout_sec: 300 # 人工接管超时时间
+
+media:
+  api_key_env: "ALTEREGO_MEDIA_API_KEY"  # 多模态/音视频工具密钥环境变量
+  max_image_dimension: 2048
+
+ui:
+  host: "127.0.0.1"
+  port: 5000
+  open_browser: true
+
+weixin:
+  enabled: false          # 是否启用微信通知与远程审批通道
+  port: 5001
+  token_ttl_hours: 72     # bot_token 本地有效期（小时），超时后需重新扫码
+  token_warn_hours: 12    # 剩余不足该小时数时在状态与日志中提示临期
+
+retention:
+  archive_days: 30        # 旧会话归档保留天数
+  upload_days: 30         # 上传临时文件保留天数
+  log_days: 14            # 日志保留天数
+  span_days: 14           # 追踪数据保留天数
+
+
+# 行为偏好与运行时安全防护配置
+behavior:
+  approval_timeout_sec: 180      # 审批超时时间（秒，默认 3 分钟 fail-closed 自动拒绝）
+  hazardous_default_scope: "session"  # 危险动作默认授权粒度 (session: 本会话, once: 仅本次, always: 始终允许)
+  tray_resident: true            # 托盘常驻：关闭窗口后继续在后台执行任务
+  auto_failover: true            # 模型调用失败自动按备用链降级

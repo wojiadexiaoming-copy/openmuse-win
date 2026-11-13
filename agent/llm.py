@@ -14,10 +14,34 @@ import time
 import threading
 import uuid
 
-from openai import OpenAI
+# 确保本地环回地址 (127.0.0.1, localhost) 永不走系统代理 (如 Clash 7890)，防止本地模型服务 (EchoBird / Ollama) 被代理劫持返回 502/503
+def _ensure_no_proxy_for_localhost():
+    cur = os.environ.get("NO_PROXY", "") or os.environ.get("no_proxy", "")
+    hosts = [h.strip() for h in cur.split(",") if h.strip()]
+    changed = False
+    for local_host in ("127.0.0.1", "localhost", "::1"):
+        if local_host not in hosts:
+            hosts.append(local_host)
+            changed = True
+    if changed:
+        val = ",".join(hosts)
+        os.environ["NO_PROXY"] = val
+        os.environ["no_proxy"] = val
 
-# Keep the real SDK type even when tests inject a constructor factory.
-_SDK_OPENAI_TYPE = OpenAI
+_ensure_no_proxy_for_localhost()
+
+_SDK_OPENAI_TYPE = None
+
+
+def _get_sdk_openai_type():
+    global _SDK_OPENAI_TYPE
+    if "OpenAI" in globals() and globals()["OpenAI"] is not None:
+        return globals()["OpenAI"]
+    if _SDK_OPENAI_TYPE is None:
+        from openai import OpenAI
+        _SDK_OPENAI_TYPE = OpenAI
+    return _SDK_OPENAI_TYPE
+
 
 from .models import Message, ToolCall
 from .vision_diagnostics import collect_request_metadata
@@ -136,6 +160,19 @@ def _adapt_cfg(role_cfg: dict) -> dict:
             "temperature": fb.get("temperature", 0.7),
             "max_tokens": fb.get("max_tokens", 8192),
         }
+    fb_chain = role_cfg.get("fallback_chain")
+    if isinstance(fb_chain, list):
+        llm["fallback_chain"] = [
+            {
+                "enabled": f.get("enabled", True) if isinstance(f, dict) else True,
+                "base_url": _expand_env(f.get("base_url", "")) if isinstance(f, dict) else "",
+                "model": f.get("model") if isinstance(f, dict) else str(f),
+                "supports_images": f.get("supports_images", False) if isinstance(f, dict) else False,
+                "temperature": f.get("temperature", 0.7) if isinstance(f, dict) else 0.7,
+                "max_tokens": f.get("max_tokens", 8192) if isinstance(f, dict) else 8192,
+            }
+            for f in fb_chain if (isinstance(f, dict) and f.get("model")) or (isinstance(f, str) and f)
+        ]
     return {"llm": llm}
 
 
@@ -174,8 +211,12 @@ def resolve_key_for_target(base_url: str, model: str, default_key: str = "", vau
                     return k
             except Exception:
                 pass
-        if default_key and default_key.startswith("sk-"):
+        # 严格检查 default_key：仅当以 sk- 开头且不是其他本地代理 key 时才复用
+        if default_key and default_key.startswith("sk-") and not default_key.startswith("sk-local"):
             return default_key
+        # 若 default_key 明显属于其他专有厂商格式（如 eb-local-、AQ.、AIzaSy、cfat_），严禁错传给 Agnes 导致 401
+        if any((default_key or "").startswith(p) for p in ("eb-local-", "AQ.", "AIzaSy", "cfat_")):
+            return ""
 
     # 2. Cloudflare Workers AI: api.cloudflare.com 或 @cf/
     elif "cloudflare.com" in url_lower or model_lower.startswith("@cf/"):
@@ -229,6 +270,22 @@ def resolve_key_for_target(base_url: str, model: str, default_key: str = "", vau
         if default_key and default_key.startswith("sk-"):
             return default_key
 
+    # 5. EchoBird / 本地智能代理网关: 127.0.0.1:53683 或 auto 或 eb-local
+    elif "53683" in url_lower or "echobird" in url_lower or model_lower == "auto" or (default_key or "").startswith("eb-local-"):
+        env_key = os.environ.get("ECHOBIRD_API_KEY", "").strip()
+        if env_key:
+            return env_key
+        if vault:
+            try:
+                k = vault.resolve("echobird_api_key", caller="agent.llm:resolve_key_for_target")
+                if k:
+                    return k
+            except Exception:
+                pass
+        if default_key and default_key.startswith("eb-local-"):
+            return default_key
+        return ""
+
     return default_key
 
 
@@ -242,18 +299,32 @@ class LLMClient:
         if clean_url.endswith("/chat/completions"):
             clean_url = clean_url[:-len("/chat/completions")].rstrip("/")
         self.base_url = clean_url
-        self.client = OpenAI(base_url=self.base_url, api_key=api_key)
+        client_cls = _get_sdk_openai_type()
+        is_local = any(h in self.base_url for h in ("127.0.0.1", "localhost", "0.0.0.0", "[::1]"))
+        if is_local:
+            import httpx
+            http_client = httpx.Client(
+                trust_env=False,
+                timeout=httpx.Timeout(connect=5.0, read=600.0, write=600.0, pool=600.0)
+            )
+            self.client = client_cls(base_url=self.base_url, api_key=api_key or "unconfigured_key", http_client=http_client)
+        else:
+            self.client = client_cls(base_url=self.base_url, api_key=api_key or "unconfigured_key")
+        self.is_unconfigured = (api_key == "unconfigured_key" or not api_key)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.fallback = fallback
         self.supports_images = supports_images
         self._request_observer = None
+        self._api_key = api_key or ""
+        self._echobird_adapter = None
+        self._echobird_checked = False
         self.request_options = _request_options_snapshot(request_options)
 
     @classmethod
-    def from_config(cls, cfg: dict, api_key: str = "", fallback_api_key: str = "", vault=None) -> "LLMClient":
-        routing = cfg.get("llm_router", {})
+    def from_config(cls, cfg: dict, api_key: str = "", fallback_api_key: str = "", vault=None, allow_unconfigured: bool = False) -> "LLMClient":
+        routing = cfg.get("llm_router") or {}  # 键存在但为 null 时 .get 默认值不生效（问题汇总 4.58）
         if routing.get("enabled") is True:
             from .llm_router import build_routed_client
             return build_routed_client(routing, role="main", vault=vault, **_routing_runtime_kwargs(cfg, vault))
@@ -269,13 +340,28 @@ class LLMClient:
             llm.get("base_url", ""), llm.get("model", ""), default_key=api_key, vault=vault
         )
         if not api_key:
-            raise RuntimeError("缺 LLM API Key：环境变量 ALTEREGO_LLM_API_KEY 或 vault（M2）")
+            if allow_unconfigured:
+                api_key = "unconfigured_key"
+            else:
+                raise RuntimeError("缺 LLM API Key：环境变量 ALTEREGO_LLM_API_KEY 或 vault（M2）")
+
+        # 构建多级容灾降级链（递归链式 LLMClient，从最末级兜底往前链接）
+        fallbacks_cfg = []
+        if isinstance(llm.get("fallback_chain"), list) and llm["fallback_chain"]:
+            fallbacks_cfg = [f for f in llm["fallback_chain"] if isinstance(f, dict) and f.get("enabled", True)]
+        elif isinstance(llm.get("fallback"), list) and llm["fallback"]:
+            fallbacks_cfg = [f for f in llm["fallback"] if isinstance(f, dict) and f.get("enabled", True)]
+        elif isinstance(llm.get("fallback"), dict) and llm["fallback"].get("enabled", True):
+            fallbacks_cfg = [llm["fallback"]]
 
         fallback_client: LLMClient | None = None
-        fb_cfg = llm.get("fallback")
-        if fb_cfg and fb_cfg.get("enabled", True):
+        for fb_item in reversed(fallbacks_cfg):
+            m_id = fb_item.get("model")
+            b_url = fb_item.get("base_url") or ""
+            if not m_id:
+                continue
             resolved_fb_key = resolve_key_for_target(
-                fb_cfg.get("base_url", ""), fb_cfg.get("model", ""),
+                b_url, m_id,
                 default_key=fallback_api_key or os.environ.get("ALTEREGO_BACKUP_LLM_API_KEY", ""),
                 vault=vault
             )
@@ -285,16 +371,18 @@ class LLMClient:
                 except Exception:
                     pass
             fb_key = resolved_fb_key or fallback_api_key or os.environ.get("ALTEREGO_BACKUP_LLM_API_KEY", "") or api_key
+            if not fb_key and any(h in b_url for h in ("127.0.0.1", "localhost", "53683")):
+                fb_key = "eb-local-no-key"
 
             if fb_key:
                 fallback_client = cls(
-                    base_url=fb_cfg["base_url"],
-                    model=fb_cfg["model"],
+                    base_url=b_url,
+                    model=m_id,
                     api_key=fb_key,
-                    temperature=fb_cfg.get("temperature", 0.7),
-                    max_tokens=fb_cfg.get("max_tokens", 8192),
-                    fallback=None,
-                    supports_images=fb_cfg.get("supports_images", False),
+                    temperature=fb_item.get("temperature", 0.7),
+                    max_tokens=fb_item.get("max_tokens", 8192),
+                    fallback=fallback_client,
+                    supports_images=fb_item.get("supports_images", False),
                 )
 
         return cls(
@@ -308,9 +396,9 @@ class LLMClient:
         )
 
     @classmethod
-    def for_role(cls, cfg: dict, role: str, vault=None, api_key: str = "", fallback_api_key: str = "") -> "LLMClient":
+    def for_role(cls, cfg: dict, role: str, vault=None, api_key: str = "", fallback_api_key: str = "", allow_unconfigured: bool = False) -> "LLMClient":
         """按角色取模型客户端。支持专属 key 隔离与自动回落。"""
-        routing = cfg.get("llm_router", {})
+        routing = cfg.get("llm_router") or {}  # 键存在但为 null 时 .get 默认值不生效（问题汇总 4.58）
         if routing.get("enabled") is True:
             from .llm_router import build_routed_client, build_embedding_client
             if role == "memory_embedding":
@@ -331,7 +419,18 @@ class LLMClient:
                     api_key = vault.resolve("llm_api_key", caller=f"agent.llm:{role}:fallback_main")
                 except Exception:
                     pass
+                if not api_key:
+                    try:
+                        api_key = vault.resolve("agnes_api_key", caller=f"agent.llm:{role}:fallback_agnes")
+                    except Exception:
+                        pass
             api_key = api_key or os.environ.get("ALTEREGO_LLM_API_KEY", "")
+            if not api_key and vault:
+                try:
+                    from agent.main import resolve_llm_key
+                    api_key = resolve_llm_key(vault)
+                except Exception:
+                    pass
 
         # 智能匹配角色主 key 与 fallback key
         target_url = (role_cfg.get("base_url") or cfg.get("llm", {}).get("base_url", ""))
@@ -357,7 +456,48 @@ class LLMClient:
             api_key=api_key,
             fallback_api_key=fallback_api_key,
             vault=vault,
+            allow_unconfigured=allow_unconfigured,
         )
+
+    def _get_echobird_adapter(self):
+        """Lazily create the EchoBird adapter only for EchoBird targets.
+
+        Keeping this out of ``__init__`` is important: constructing a client must
+        never perform network I/O.
+        """
+        if not self._echobird_checked:
+            self._echobird_checked = True
+            from .echobird_adapter import EchoBirdAdapter, is_echobird_target
+
+            if is_echobird_target(self.base_url, self.model, self._api_key):
+                self._echobird_adapter = EchoBirdAdapter(
+                    self.base_url, self.model, self._api_key
+                )
+        return self._echobird_adapter
+
+    def probe_echobird(self, force: bool = False) -> dict | None:
+        """Return the latest EchoBird probe diagnostics, or None for other targets."""
+        adapter = self._get_echobird_adapter()
+        if adapter is None:
+            return None
+        return adapter.probe(force=force).to_dict()
+
+    def get_echobird_route_info(self) -> dict | None:
+        """Return probe/last-route/capability diagnostics for the settings UI."""
+        adapter = self._get_echobird_adapter()
+        if adapter is None:
+            return None
+        return adapter.info()
+
+    @staticmethod
+    def _echobird_trace_fields(route) -> dict | None:
+        if route is None or not route.route_key:
+            return None
+        return {
+            "echobird_route": route.route_key,
+            "echobird_provider": route.provider,
+            "echobird_model": route.model_id,
+        }
 
     def set_request_observer(self, observer):
         """Attach an optional metadata-only callback to this client and fallbacks."""
@@ -367,7 +507,7 @@ class LLMClient:
         return self
 
     def _observe_request(self, payload, tools, context, started, success, error=None,
-                         phase="request", request_attempted=True, usage=None):
+                         phase="request", request_attempted=True, usage=None, extra=None):
         if self._request_observer is None:
             return
         try:
@@ -383,6 +523,8 @@ class LLMClient:
                 "request_attempted": request_attempted,
             })
             metadata.update(usage or {"usage_available": False})
+            if extra:
+                metadata.update(extra)
             if error is not None:
                 metadata["error_type"] = type(error).__name__
             self._request_observer(metadata)
@@ -393,6 +535,8 @@ class LLMClient:
     def chat(self, messages: list[Message], tools: list[dict] | None = None,
              known_tools: set[str] | None = None) -> Message:
         """调一次 LLM，按实际发出的主/备请求分别报告脱敏诊断元数据。"""
+        if getattr(self, "is_unconfigured", False):
+            raise RuntimeError("尚未配置模型 API Key，请点击右上角【设置】填写您的 API Key 并在保存后再发送消息。")
         context = _request_context.get()
         root_token = None
         if context is None:
@@ -411,33 +555,78 @@ class LLMClient:
                 kwargs["tool_choice"] = "auto"
             started = time.perf_counter()
             usage = {"usage_available": False}
+            route = None
             try:
+                adapter = self._get_echobird_adapter()
+                if adapter is not None:
+                    # Probe is advisory, but a confirmed 401/403 means the real
+                    # request would certainly fail. Avoid spending a second call.
+                    probe_result = adapter.probe()
+                    if not probe_result.ok and probe_result.error_category == "auth":
+                        raise RuntimeError(
+                            "EchoBird API Key 认证失败 (401/403)。请检查 ECHOBIRD_API_KEY "
+                            "或设置中的 EchoBird 密钥。"
+                        )
+                    kwargs = adapter.build_payload(kwargs)
+
                 for attempt in range(2):
                     try:
-                        if isinstance(self.client, _SDK_OPENAI_TYPE):
+                        from openai import OpenAI as _RealOpenAI
+                        if isinstance(self.client, _RealOpenAI):
                             # Inspect original JSON before Pydantic coerces invalid counters.
                             raw_response = self.client.chat.completions.with_raw_response.create(**kwargs)
+                            body = None
                             try:
                                 body = raw_response.http_response.json()
                                 usage = _response_usage(body.get("usage") if isinstance(body, dict) else None)
                             except Exception:
                                 pass
+                            if adapter is not None:
+                                route = adapter.observe_response(
+                                    raw_response.http_response.headers,
+                                    body.get("model") if isinstance(body, dict) else None,
+                                )
                             resp = raw_response.parse()
                         else:
                             resp = self.client.chat.completions.create(**kwargs)
                             usage = _response_usage(getattr(resp, "usage", None))
+                            if adapter is not None:
+                                route = adapter.observe_response(
+                                    None, getattr(resp, "model", None)
+                                )
                         break
                     except Exception as _req_exc:
+                        if adapter is not None:
+                            observed = adapter.observe_error(_req_exc)
+                            if observed is not None and observed.route_key:
+                                route = observed
+                        if adapter is not None and attempt == 0:
+                            adapted = adapter.adapt_payload(kwargs, _req_exc)
+                            if adapted is not None:
+                                kwargs = adapted
+                                logger.info(
+                                    "[%s] EchoBird 路由不接受部分请求参数，移除后重试一次",
+                                    self.model,
+                                )
+                                continue
                         max_retries = getattr(self.client, "max_retries", 2)
-                        if max_retries > 0 and type(_req_exc).__name__ == "RateLimitError" and attempt == 0:
+                        if isinstance(max_retries, int) and max_retries > 0 and type(_req_exc).__name__ == "RateLimitError" and attempt == 0:
                             logger.info("[%s] 遇到频率限制 (RateLimitError)，等待 2 秒后重试...", self.model)
                             time.sleep(2.0)
                             continue
                         raise _req_exc
                 result = self._from_openai(resp, known_tools=known_tools)
-                result.metadata.update({"actual_model": self.model, **usage})
+                metadata = {"actual_model": self.model, **usage}
+                route_fields = self._echobird_trace_fields(route)
+                if route_fields:
+                    metadata.update(route_fields)
+                result.metadata.update(metadata)
             except Exception as exc:
-                self._observe_request(payload, tools, context, started, False, exc, usage=usage)
+                route_fields = self._echobird_trace_fields(route)
+                self._observe_request(
+                    payload, tools, context, started, False, exc,
+                    usage=usage, extra=route_fields,
+                )
                 if self.fallback:
                     self.fallback.set_request_observer(self._request_observer)
                     fallback_context = {
@@ -469,7 +658,10 @@ class LLMClient:
                     finally:
                         _request_context.reset(fallback_token)
                 raise
-            self._observe_request(payload, tools, context, started, True, usage=usage)
+            self._observe_request(
+                payload, tools, context, started, True,
+                usage=usage, extra=self._echobird_trace_fields(route),
+            )
             return result
         finally:
             if root_token is not None:
@@ -532,6 +724,7 @@ class LLMClient:
         import ast
         import re
         import uuid
+
         choice = resp.choices[0].message
         tcs = []
         for tc in (choice.tool_calls or []):
@@ -749,4 +942,10 @@ class LLMClient:
                     content_val = re.sub(r"```(?:json)?\s*```?", "", content_val).strip()
 
         return Message(role="assistant", content=content_val or "", tool_calls=tcs)
+
+
+def __getattr__(name: str):
+    if name in ("OpenAI", "_SDK_OPENAI_TYPE"):
+        return _get_sdk_openai_type()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 

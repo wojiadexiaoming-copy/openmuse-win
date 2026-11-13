@@ -147,7 +147,47 @@ def test_channel_approval_notification_and_remote_resolve(tmp_path):
         assert p["decision"] is True
         # 验证微信收到了通过授权通知
         mock_send.assert_called_once()
-        assert "已通过授权" in mock_send.call_args[1]["text"]
+        assert "已通过" in mock_send.call_args[1]["text"]
+        assert "授权" in mock_send.call_args[1]["text"]
+        assert p["scope"] == "once"
+
+
+@pytest.mark.parametrize("reply,risk,expected_scope,expected_notice", [
+    ("2", "L2", "session", "本会话相同目标"),
+    ("3", "L2", "always", "始终相同目标"),
+    ("3", "L3", "once", "高风险不允许始终授权"),
+])
+def test_channel_approval_scope_commands(tmp_path, reply, risk, expected_scope, expected_notice):
+    approval_mgr = ApprovalManager(db_path=str(tmp_path / "approvals.db"))
+    ch = WeixinChannel(data_dir=tmp_path, approval_mgr=approval_mgr)
+    ch.save_credentials({
+        "bot_token": "mock_token", "ilink_bot_id": "mock_bot", "ilink_user_id": "mock_user",
+        "baseurl": "https://ilinkai.weixin.qq.com",
+    })
+    card = ApprovalCard(
+        approval_id=f"ap-{reply}-{risk}", action="file_write", detail='{"path":"清单.txt"}',
+        action_cn="写入/创建本地文件", summary_cn="写入清单.txt", risk=risk,
+    )
+    import threading
+    approval_mgr._pending[card.approval_id] = {
+        "card": card, "event": threading.Event(), "decision": None, "scope": "once",
+    }
+    with patch.object(ch.client, "send_message") as mock_send:
+        ch.notify_approval(card)
+        notice = mock_send.call_args[1]["text"]
+        assert "【1】或「同意」：仅本次授权" in notice
+        assert "【2】：本会话允许相同操作/同一文件" in notice
+        assert ("【3】" in notice) == (risk != "L3")
+
+    with patch.object(ch.client, "send_message") as mock_send:
+        ch._handle_inbound_message({
+            "from_user_id": "mock_user", "context_token": "ctx_123",
+            "item_list": [{"type": 1, "text_item": {"text": reply}}],
+        }, "mock_token", "mock_bot", "https://ilinkai.weixin.qq.com")
+        pending = approval_mgr._pending[card.approval_id]
+        assert pending["decision"] is True
+        assert pending["scope"] == expected_scope
+        assert expected_notice in mock_send.call_args[1]["text"]
 
 
 def test_channel_dispatches_task_to_orchestrator(tmp_path):
@@ -271,7 +311,7 @@ def test_client_content_length_and_send_lock():
 
     with patch("httpx.Client") as mock_http:
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"ret": 0}
+        mock_resp.text = '{"ret": 0}'
         mock_http.return_value.__enter__.return_value.post.return_value = mock_resp
 
         client.send_message(
@@ -281,5 +321,7 @@ def test_client_content_length_and_send_lock():
         )
         post_kwargs = mock_http.return_value.__enter__.return_value.post.call_args.kwargs
         headers = post_kwargs["headers"]
+        raw = post_kwargs["content"]
         assert "Content-Length" in headers
-        assert int(headers["Content-Length"]) > 0
+        assert int(headers["Content-Length"]) == len(raw)
+        assert "测试文本".encode("utf-8") in raw

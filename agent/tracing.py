@@ -54,6 +54,9 @@ class Span:
 
 
 class Tracer:
+    # 未结束 span 超过该时长视为上一进程遗留的孤儿（单回合硬上限 20 分钟 + 收尾）
+    STALE_SPAN_SEC = 2 * 60 * 60
+
     def __init__(self, db_path: str):
         from agent.db import get_db
         self._lock = threading.RLock()
@@ -71,6 +74,14 @@ class Tracer:
             # Legacy starts used status='ok' before any completion was recorded.
             self.db.execute("UPDATE spans SET status='running'"
                             " WHERE ended_at IS NULL AND status='ok'")
+            # 孤儿 span 清扫：崩溃/重启遗留的未结束 span 不再永远显示"执行中"。
+            # 只清超龄的（2 小时），避免误伤另一实例正在跑的回合。
+            now = time.time()
+            self.db.execute(
+                "UPDATE spans SET status='abandoned', ended_at=?"
+                " WHERE ended_at IS NULL AND started_at < ?"
+                " AND status IN ('running','ok')",
+                (now, now - self.STALE_SPAN_SEC))
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS events"
                 "(id INTEGER PRIMARY KEY AUTOINCREMENT, trace_id TEXT,"
@@ -112,26 +123,42 @@ class Tracer:
         """只持久化诊断元数据，不保存提示词、工具参数或异常原文。"""
         text_fields = {"scope", "status", "channel", "session_id", "error_type",
                        "tool", "model", "phase", "request_id", "requested_model",
-                       "actual_model", "base_url_host", "provider", "role", "error_category", "failure_category"}
+                       "actual_model", "base_url_host", "provider", "role", "error_category", "failure_category",
+                       "reason", "flow_template", "task_id", "name"}
         number_fields = {"original_len", "input_chars", "extracted_count",
                          "corrections", "duration_ms", "tokens_in", "tokens_out",
                          "iterations", "retry", "input", "output", "image_count",
-                         "tool_count", "elapsed_ms", "fallback_depth", "status_code", "dimensions", "vector_count", "input_count"}
+                         "tool_count", "elapsed_ms", "fallback_depth", "status_code", "dimensions", "vector_count", "input_count",
+                         "step", "used", "budget", "content_chars", "reply_chars",
+                         "total_steps", "nudges_used", "progress",
+                         "new_info_steps", "running_count", "advancing_count",
+                         "idle_sec", "fresh", "extensions_used", "max_extensions",
+                         "extension_sec"}
         clean = {}
         for key, value in (data or {}).items():
             if key in {"prompt_tokens", "completion_tokens", "total_tokens",
                        "message_count", "text_characters"}:
                 if _valid_token_count(value):
                     clean[key] = value
+            elif key in {"running_subagents", "advancing_subagents"} and isinstance(value, (list, tuple)):
+                clean[key] = [str(item)[:60] for item in value][:20]
             elif (key in number_fields and isinstance(value, (int, float))
                     and not isinstance(value, bool) and math.isfinite(value)):
                 clean[key] = value
-            elif key in {"success", "is_fallback", "request_attempted", "usage_available"} and isinstance(value, bool):
+            elif key in {"success", "is_fallback", "request_attempted", "usage_available",
+                         "has_tool_calls", "self_progress"} and isinstance(value, bool):
                 clean[key] = value
             elif (key in text_fields and isinstance(value, str)
-                  and re.fullmatch(r"[A-Za-z0-9_.:/@-]{1,160}", value)
+                  and len(value) <= 160
                   and not re.search(r"(?i)(sk-|bearer|api[_-]?key|secret)", value)):
                 clean[key] = value
+        if "tool_call_names" in (data or {}) and isinstance(data["tool_call_names"], (list, tuple)):
+            clean["tool_call_names"] = [str(n)[:60] for n in data["tool_call_names"] if isinstance(n, str)][:20]
+        for long_field in ("content_preview", "detail"):
+            if long_field in (data or {}) and isinstance(data[long_field], str):
+                val = data[long_field][:500]
+                if not re.search(r"(?i)(sk-[a-zA-Z0-9_-]{10,}|bearer\s+[a-zA-Z0-9_\-\.]{10,}|api[_-]?key)", val):
+                    clean[long_field] = val
         if event == "llm_request" and isinstance((data or {}).get("images"), list):
             clean["images"] = [_safe_image_metadata(item) for item in data["images"]
                                if isinstance(item, dict)]
@@ -192,6 +219,19 @@ class Tracer:
                 for tid, event, created, data in events
             ], ensure_ascii=False, indent=2))
         return str(out)
+
+    def cleanup(self, days: int = 14) -> dict[str, int]:
+        cutoff = time.time() - max(1, days) * 86400
+        with self._lock:
+            cur1 = self.db.execute("DELETE FROM spans WHERE started_at < ?", (cutoff,))
+            del_spans = cur1.rowcount
+            cur2 = self.db.execute("DELETE FROM events WHERE created_at < ?", (cutoff,))
+            del_events = cur2.rowcount
+            self.db.commit()
+            return {
+                "deleted_spans": max(0, del_spans),
+                "deleted_events": max(0, del_events),
+            }
 
     def close(self):
         with self._lock:

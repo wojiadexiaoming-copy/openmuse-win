@@ -1,4 +1,5 @@
 """Offline Weixin stage receipts: scoped, once per turn, before the final reply."""
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -236,9 +237,10 @@ def test_client_uses_selected_io_timeout_without_real_network(timeout):
     client = WeixinClient()
     with patch("channels.weixin.httpx.Client") as http:
         response = http.return_value.__enter__.return_value.post.return_value
-        response.json.return_value = {"ret": 0}
+        response.text = '{"ret": 0}'
         kwargs = {} if timeout is None else {"timeout_sec": timeout}
         client.send_message(token="offline", to_user_id="user", text=RECEIPT, **kwargs)
         http.assert_called_once_with(timeout=15.0 if timeout is None else 3.0)
-        body = http.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+        raw = http.return_value.__enter__.return_value.post.call_args.kwargs["content"]
+        body = json.loads(raw.decode("utf-8"))
         assert body["msg"]["item_list"] == [{"type": 1, "text_item": {"text": RECEIPT}}]

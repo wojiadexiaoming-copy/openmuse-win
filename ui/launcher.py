@@ -1,10 +1,28 @@
 """Windows desktop entry with startup phases and a verified local backend."""
 from __future__ import annotations
 
-import http.client
-import json
 import os
 import sys
+
+# USB/外置固定盘冷启动性能优化：
+# 1. 禁用 Pydantic v2 插件扫描（避免首次导入时枚举 site-packages 所有 .dist-info）
+os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "1")
+
+# 2. 将 Python 字节码缓存重定向到本机快速 SSD（减少对外置盘的 __pycache__ 读写）
+# 3. 窗口创建后后台预热 openai/httpx/pydantic 等重依赖，避免首次聊天卡顿
+try:
+    from pathlib import Path
+    _local_cache = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "AlterEgo" / "pycache"
+    _local_cache.mkdir(parents=True, exist_ok=True)
+    if "PYTHONPYCACHEPREFIX" not in os.environ:
+        os.environ["PYTHONPYCACHEPREFIX"] = str(_local_cache)
+    if getattr(sys, "pycache_prefix", None) is None:
+        sys.pycache_prefix = str(_local_cache)
+except Exception:
+    pass
+
+import http.client
+import json
 import threading
 import time
 from pathlib import Path
@@ -85,16 +103,75 @@ def _wait_backend(host, port, thread, *, timeout=10.0):
     raise TimeoutError("backend readiness timed out")
 
 
+def _ensure_windows_desktop_runtime() -> None:
+    """Ensure pythonnet / CLR can load when running from network/UNC mapped shares."""
+    if sys.platform != "win32":
+        return
+
+    try:
+        import atexit
+        import shutil
+        import tempfile
+        import clr_loader
+        import pythonnet
+
+        if getattr(pythonnet, "_LOADED", False):
+            return
+
+        temp_dir = Path(tempfile.gettempdir()) / "alterego_desktop_runtime"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        cfg_file = temp_dir / "alterego.config"
+        cfg_file.write_text(
+            '<?xml version="1.0" encoding="utf-8" ?>\n'
+            '<configuration>\n'
+            '  <runtime>\n'
+            '    <loadFromRemoteSources enabled="true"/>\n'
+            '  </runtime>\n'
+            '</configuration>\n',
+            encoding="utf-8",
+        )
+
+        rt = clr_loader.get_netfx(domain="alterego_domain", config_file=str(cfg_file))
+        src_dll = Path(pythonnet.__file__).parent / "runtime" / "Python.Runtime.dll"
+        local_dll = temp_dir / "Python.Runtime.dll"
+        if not local_dll.exists() or local_dll.stat().st_size != src_dll.stat().st_size:
+            shutil.copyfile(src_dll, local_dll)
+
+        asm = rt.get_assembly(str(local_dll))
+        fn = asm.get_function("Python.Runtime.Loader.Initialize")
+        if fn(b"") == 0:
+            pythonnet._LOADED = True
+            pythonnet._RUNTIME = rt
+            pythonnet._LOADER_ASSEMBLY = asm
+            atexit.register(pythonnet.unload)
+            import clr  # noqa: F401
+    except Exception:
+        try:
+            import clr  # noqa: F401
+        except Exception:
+            pass
+
+
 def main() -> None:
     if sys.platform != "win32":
         raise RuntimeError("launcher.py requires Windows")
+    from agent.paths import resolve_data_dir
+    from agent.singleton import SingleInstanceLock
+    data_dir = resolve_data_dir()
+    lock_file = data_dir / "app.lock"
+    instance_lock = SingleInstanceLock(lock_file)
+    if not instance_lock.acquire():
+        print("[AlterEgo] 检测到已有正在运行的 AlterEgo 实例 (app.lock)，为避免双实例冲突本次启动已停止。")
+        sys.exit(1)
+
     # Import this stdlib-only module before pywebview, app modules or SQLite.
     from ui.startup import StartupDiagnostics
-    diagnostics = StartupDiagnostics(Path(os.environ.get("ALTEREGO_DATA", str(REPO_ROOT))))
+    diagnostics = StartupDiagnostics(data_dir)
     httpd = None
     thread = None
     server = None
     try:
+        _ensure_windows_desktop_runtime()
         diagnostics.phase("import_webview")
         import webview
         diagnostics.phase("import_backend")
@@ -109,6 +186,7 @@ def main() -> None:
             print(f"[AlterEgo] 端口 5000 被占用，已改用 {bound_port}")
         diagnostics.phase("initialize_backend")
         server = AgentServer(startup_progress=diagnostics.phase)
+        server.port = bound_port
         httpd.set_app(server.app)
         thread = threading.Thread(
             target=lambda: httpd.serve_forever(poll_interval=0.1),
@@ -143,7 +221,7 @@ def main() -> None:
                 x=ui_geo["x"], y=ui_geo["y"],
                 width=ui_geo["width"], height=ui_geo["height"],
                 frameless=frameless,
-                easy_drag=True,
+                easy_drag=False,
                 shadow=True,
                 min_size=(240, 480))
         else:
@@ -152,7 +230,7 @@ def main() -> None:
                 target_url,
                 width=1280, height=800,
                 frameless=frameless,
-                easy_drag=True,
+                easy_drag=False,
                 shadow=True,
                 min_size=(240, 480))
 
@@ -161,21 +239,17 @@ def main() -> None:
         if hasattr(window, "events") and hasattr(window.events, "loaded"):
             window.events.loaded += diagnostics.ready
 
-        if frameless and sys.platform == "win32" and hasattr(window, "events") and hasattr(window.events, "shown"):
-            def _enable_native_resize():
-                try:
-                    import ctypes
-                    hwnd = getattr(window, "native", None)
-                    if hwnd and hasattr(hwnd, "Handle"):
-                        h = hwnd.Handle.ToInt32()
-                        GWL_STYLE = -16
-                        WS_THICKFRAME = 0x00040000
-                        style = ctypes.windll.user32.GetWindowLongW(h, GWL_STYLE)
-                        ctypes.windll.user32.SetWindowLongW(h, GWL_STYLE, style | WS_THICKFRAME)
-                        ctypes.windll.user32.SetWindowPos(h, 0, 0, 0, 0, 0, 0x0027)
-                except Exception:
-                    pass
-            window.events.shown += _enable_native_resize
+        # T06 性能优化：窗口创建后，在后台线程中预热重型 Python 依赖（openai/httpx/pydantic），
+        # 避免首轮请求交互时产生首次文件导入延迟
+        def _prewarm_modules():
+            try:
+                import openai  # noqa: F401
+                import httpx   # noqa: F401
+                import pydantic  # noqa: F401
+            except Exception:
+                pass
+
+        threading.Thread(target=_prewarm_modules, daemon=True, name="alterego-prewarm").start()
 
         diagnostics.phase("start_desktop_runtime")
         webview.start(debug=False, icon=icon_arg)
@@ -209,6 +283,7 @@ def main() -> None:
                     except Exception:
                         pass
         diagnostics.close()
+        instance_lock.release()
 
 
 if __name__ == "__main__":

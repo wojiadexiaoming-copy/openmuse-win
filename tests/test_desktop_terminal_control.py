@@ -189,6 +189,20 @@ def test_terminal_without_manual_dependency_stays_incomplete(verification):
     assert verification[1].call_count == 1
 
 
+def test_focus_contention_reply_names_user_input_and_resume(verification):
+    message = Message(role="tool", name="desktop_click", content="[桌面已让出] 检测到物理用户输入。",
+                      metadata={"tool_control": {"retryable": False, "requires_user": True,
+                                                 "reason": "focus_contention"}})
+    orch = Orchestrator(MagicMock(), FakeRegistry(), fake_context())
+    orch._notice_tool_control(message)
+
+    reply = orch._terminal_reply().content
+
+    assert "鼠标或键盘" in reply and "停止操作后回复“继续”" in reply and "重新截图" in reply
+    assert "无法自动重试" not in reply
+    assert result_summary(message) == "检测到用户正在操作鼠标或键盘，已暂停，停止操作后可继续"
+
+
 def test_focus_false_remains_authoritative_over_editable_and_keyboard_focus():
     message = Message(role="tool", name="desktop_inspect_focus", content="[桌面焦点检查] editable=true",
                       metadata={"desktop_verification": {"focus_verified": False,

@@ -39,7 +39,7 @@ def test_settings_policy(tmp_path):
     assert st.get("file_write") == "deny"
     st.set("desktop_click", "deny", target="app:Recordly")
     assert st.get("desktop_click", "app:Recordly") == "deny"
-    assert st.get("desktop_click") == "ask"
+    assert st.get("desktop_click") == "allow"
 
 
 def test_verifier_no_criteria():
@@ -126,7 +126,9 @@ def test_subagent_run_with_retry_success():
                 self.last_turn_tool_records = []
                 return "初步尝试，未产生证据"
             # 第二轮：产出有效证据
-            self.last_turn_tool_records = [{"tool": "file_write", "status": "ok", "args": {"path": "out.txt"}}]
+            self.last_turn_tool_records = [{"tool": "file_write", "status": "ok",
+                                            "args": {"path": "out.txt"},
+                                            "result": "written"}]
             return "成功生成 out.txt"
 
     mgr = SubagentManager(make_orchestrator=MockOrch)

@@ -4,14 +4,16 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any
-
-import httpx
 
 from agent.tools_registry import ToolDefinition
 
 BASE_URL = "https://apihub.agnes-ai.com/v1"
 API_KEY = ""
+
+
+def _get_httpx():
+    import httpx
+    return httpx
 
 
 def configure(base_url: str = "", api_key: str = ""):
@@ -70,7 +72,7 @@ def image_generate(args: dict[str, Any]) -> str:
         "size": size,
     }
     try:
-        resp = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+        resp = _get_httpx().post(url, headers=headers, json=payload, timeout=60.0)
         if resp.status_code != 200:
             return f"[生成失败] HTTP {resp.status_code}: {resp.text}"
         data = resp.json()
@@ -103,7 +105,7 @@ def video_generate(args: dict[str, Any]) -> str:
         "size": "720P",
     }
     try:
-        resp = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+        resp = _get_httpx().post(url, headers=headers, json=payload, timeout=60.0)
         if resp.status_code not in (200, 201, 202):
             return f"[视频任务创建失败] HTTP {resp.status_code}: {resp.text}"
         data = resp.json()
@@ -126,6 +128,9 @@ IMAGE_TOOL = ToolDefinition(
         "required": ["prompt"],
     },
     func=image_generate,
+    parallel_safe=False,
+    is_readonly=False,
+    cacheable=False,
 )
 
 VIDEO_TOOL = ToolDefinition(
@@ -139,6 +144,9 @@ VIDEO_TOOL = ToolDefinition(
         "required": ["prompt"],
     },
     func=video_generate,
+    parallel_safe=False,
+    is_readonly=False,
+    cacheable=False,
 )
 
 MEDIA_TOOLS = [IMAGE_TOOL, VIDEO_TOOL]

@@ -63,9 +63,11 @@ def register_all(registry: ToolRegistry, cfg: dict, api_key: str = ""):
 
     desktop_cfg = tools_cfg.get("desktop", {})
     if desktop_cfg.get("enabled", True):
-        from .desktop import DESKTOP_TOOLS
+        from .desktop import DESKTOP_TOOLS, DESKTOP_ALIASES
         for t in DESKTOP_TOOLS:
             registry.register(_apply_cfg(t, desktop_cfg))
+        for alias, target in DESKTOP_ALIASES.items():
+            registry.register_alias(alias, target)
 
 
 def _apply_cfg(tool: ToolDefinition, cfg: dict) -> ToolDefinition:

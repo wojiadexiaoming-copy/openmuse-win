@@ -137,6 +137,102 @@ def test_desktop_click_fallback_to_physical_mouse_when_pattern_unsupported(uia_s
     gui.click.assert_called_once_with(250, 325)
 
 
+def test_save_as_edit_recovers_with_verified_uia_focus(uia_session, monkeypatch):
+    state, gui = uia_session
+    controls = [
+        {"control_ref": "uia:filename", "name": "文件名:", "control_type": "Edit",
+         "rect": {"left": 136, "top": 387, "right": 927, "bottom": 406},
+         "enabled": True, "focusable": False, "editable": True,
+         "value_supported": True, "patterns": ["Value"], "ref": "c1"}
+    ]
+    state.observe({"hwnd": 1234, "rect": {"left": 0, "top": 0, "right": 1920, "bottom": 1080},
+                   "title": "Target App", "foreground": True},
+                  (1920, 1080), (1920, 1080), controls, ref_map={"c1": controls[0]})
+    monkeypatch.setattr(desktop, "_probe", lambda window_title="", hwnd=None: {
+        "ok": True, "supported": True,
+        "window": {"hwnd": 1234, "title": "Target App", "foreground": True,
+                   "rect": {"left": 0, "top": 0, "right": 1920, "bottom": 1080}},
+        "controls": controls,
+    })
+    monkeypatch.setattr(desktop, "_read_focus", lambda hwnd: {
+        "ok": False, "error_type": "focus_not_confirmed",
+        "window": {"hwnd": 1234, "foreground": True},
+    })
+    focused = {
+        "ok": True, "window": {"hwnd": 1234, "foreground": True},
+        "focus": {"control_ref": "uia:filename", "name": "文件名:", "control_type": "Edit",
+                  "rect": controls[0]["rect"], "enabled": True, "editable": True,
+                  "is_password": False, "value_supported": True, "value": ""},
+    }
+    from tools import desktop_accessibility
+    monkeypatch.setattr(desktop_accessibility, "focus_control", lambda hwnd, ref: focused)
+
+    result = desktop.desktop_click({"snapshot_id": state.snapshot["snapshot_id"], "ref": "c1"})
+
+    verification = result.metadata["desktop_verification"]
+    assert verification["focus_verified"] and verification["input_allowed"]
+    assert verification["focus_fallback_used"]
+    assert "UIA 聚焦并复核" in result.content
+    gui.click.assert_called_once_with(532, 396)
+
+
+def test_post_hotkey_rebinds_owned_save_as_dialog(uia_session, monkeypatch):
+    state, gui = uia_session
+    notepad = {"hwnd": 1234, "title": "无标题 - Notepad", "foreground": True,
+               "rect": {"left": 0, "top": 0, "right": 1920, "bottom": 1080}}
+    dialog = {"hwnd": 5678, "title": "另存为", "foreground": True,
+              "rect": {"left": 0, "top": 0, "right": 960, "bottom": 540}}
+    controls = [{"control_ref": "uia:filename", "name": "文件名:", "control_type": "Edit",
+                 "rect": {"left": 136, "top": 387, "right": 927, "bottom": 406},
+                 "enabled": True, "editable": True, "value_supported": True, "patterns": ["Value"]}]
+    state.observe(notepad, (1920, 1080), (1920, 1080), [])
+    monkeypatch.setattr(desktop, "_owned_foreground_modal",
+                        lambda owner: 5678 if owner == 1234 else None)
+    monkeypatch.setattr(desktop, "_probe", lambda window_title="", hwnd=None: {
+        "ok": True, "supported": True, "window": deepcopy(dialog if hwnd == 5678 else notepad),
+        "controls": controls if hwnd == 5678 else [],
+    })
+
+    old_snapshot = state.snapshot["snapshot_id"]
+    result = desktop.desktop_hotkey({"keys": ["ctrl", "s"], "snapshot_id": old_snapshot})
+
+    observation = result.metadata["desktop_observation"]
+    assert observation["window"]["hwnd"] == 5678
+    assert observation["window"]["title"] == "另存为"
+    assert state.snapshot["snapshot_id"] != old_snapshot
+    assert state.resolve_control("c1")["control_ref"] == "uia:filename"
+    gui.hotkey.assert_called_once_with("ctrl", "s")
+
+
+def test_stale_parent_click_returns_fresh_dialog_snapshot_without_clicking(uia_session, monkeypatch):
+    state, gui = uia_session
+    notepad = {"hwnd": 1234, "title": "无标题 - Notepad", "foreground": False,
+               "rect": {"left": 0, "top": 0, "right": 1920, "bottom": 1080}}
+    dialog = {"hwnd": 5678, "title": "另存为", "foreground": True,
+              "rect": {"left": 0, "top": 0, "right": 960, "bottom": 540}}
+    old_controls = [{"control_ref": "uia:filename", "name": "文件名:", "control_type": "Edit",
+                     "rect": {"left": 136, "top": 387, "right": 927, "bottom": 406},
+                     "enabled": True, "editable": True, "value_supported": True,
+                     "patterns": ["Value"], "ref": "c1"}]
+    state.observe(notepad, (1920, 1080), (1920, 1080), old_controls,
+                  ref_map={"c1": old_controls[0]})
+    monkeypatch.setattr(desktop, "_owned_foreground_modal",
+                        lambda owner: 5678 if owner == 1234 else None)
+    monkeypatch.setattr(desktop, "_probe", lambda window_title="", hwnd=None: {
+        "ok": True, "supported": True, "window": deepcopy(dialog),
+        "controls": old_controls,
+    })
+
+    old_snapshot = state.snapshot["snapshot_id"]
+    result = desktop.desktop_click({"snapshot_id": old_snapshot, "ref": "c1"})
+
+    assert "[桌面目标已切换]" in result.content
+    assert "本次未发送点击" in result.content
+    assert result.metadata["desktop_observation"]["window"]["hwnd"] == 5678
+    assert state.snapshot["snapshot_id"] != old_snapshot
+    gui.click.assert_not_called()
+
+
 def test_desktop_type_value_pattern_direct_write(uia_session, monkeypatch):
     state, gui = uia_session
     

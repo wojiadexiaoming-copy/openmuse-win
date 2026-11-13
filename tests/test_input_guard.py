@@ -159,11 +159,13 @@ def test_clean_screenshot_hides_overlay():
     assert raw == b"fake_png_bytes"
     # 验证在截图前调用了 evaluate 隐藏 __alterego_root 并禁用 style
     calls = mock_page.evaluate.call_args_list
-    assert len(calls) >= 2
-    # 第一次隐藏
-    assert "display" in calls[0][0][0] and "none" in calls[0][0][0]
-    # 第二次恢复
-    assert "removeProperty" in calls[1][0][0]
+    assert len(calls) >= 3
+    # 第一次回显瞬态 SoM 框选
+    assert "__ae_som_pulse" in calls[0][0][0]
+    # 第二次隐藏
+    assert "display" in calls[1][0][0] and "none" in calls[1][0][0]
+    # 第三次恢复
+    assert "removeProperty" in calls[2][0][0]
 
 
 def test_snapshot_and_click_filter_internal_ui():

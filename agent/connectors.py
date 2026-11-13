@@ -233,6 +233,9 @@ def make_connector_tools(manager: "ConnectorManager"):
                                                   "description": "连接器名，如 gmail"}},
                          "required": []},
             func=_auth_link,
+            parallel_safe=True,
+            is_readonly=True,
+            cacheable=False,
         ),
         ToolDefinition(
             name="gmail_list",
@@ -243,6 +246,9 @@ def make_connector_tools(manager: "ConnectorManager"):
                              "max_results": {"type": "integer", "description": "最多几封"}},
                          "required": []},
             func=_gmail_list,
+            parallel_safe=True,
+            is_readonly=True,
+            cacheable=False,
         ),
         ToolDefinition(
             name="gmail_send",
@@ -254,5 +260,8 @@ def make_connector_tools(manager: "ConnectorManager"):
                              "body": {"type": "string"}},
                          "required": ["to", "subject", "body"]},
             func=_gmail_send,
+            parallel_safe=False,
+            is_readonly=False,
+            cacheable=False,
         ),
     ]

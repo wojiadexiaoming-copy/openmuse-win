@@ -187,10 +187,10 @@ def test_batch_exception_pairs_every_call_and_preserves_completed_result(tmp_pat
             ToolCall(id="first", name="file_write"), ToolCall(id="second", name="file_edit")]))
     reg = registry(tool("file_write", lambda _: "first output"), tool("file_edit", lambda _: "second output"))
     execute = reg.execute
-    def fail_second(name, arguments):
+    def fail_second(name, arguments, **kwargs):
         if name == "file_edit":
             raise RuntimeError("approval check failed")
-        return execute(name, arguments)
+        return execute(name, arguments, **kwargs)
     reg.execute = fail_second
     orch = Orchestrator(llm, reg, ContextBuilder(), parallel_tools=parallel)
     with pytest.raises(RuntimeError):

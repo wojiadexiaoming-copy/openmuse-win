@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 
 import yaml
@@ -16,12 +17,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.approval import ApprovalManager
 from agent.context import ContextBuilder
+from agent.evolution_tools import make_evolution_tools
+from agent.experience import ExperienceStore
 from agent.llm import LLMClient
 from agent.memory_manager import MemoryManager
+from agent.memory_pipeline import run_memory_distill
 from agent.orchestrator import Orchestrator
 from agent.resource_lock import ResourceLock
 from agent.session_store import SessionStore
 from agent.settings import Settings
+from agent.skill_distiller import SkillManager
 from agent.task_tracker import TaskTracker
 from agent.tools_registry import ToolRegistry
 from agent.tracing import Tracer, make_llm_request_observer
@@ -77,10 +82,42 @@ def resolve_llm_key(vault: Vault) -> str:
     env_key = os.environ.get("ALTEREGO_LLM_API_KEY", "").strip()
     if env_key:
         return env_key
-    try:
-        return vault.resolve("llm_api_key", caller="agent.main")
-    except (PermissionError, KeyError):
-        return ""
+    if vault is not None:
+        try:
+            k = vault.resolve("llm_api_key", caller="agent.main")
+            if k:
+                return k
+        except (PermissionError, KeyError):
+            pass
+        # 尝试从 vault 中的 agnes_api_key 或 echobird_api_key 恢复
+        for candidate_key in ("echobird_api_key", "agnes_api_key"):
+            try:
+                k = vault.resolve(candidate_key, caller="agent.main")
+                if k:
+                    try:
+                        vault.set("llm_api_key", k)
+                    except Exception:
+                        pass
+                    return k
+            except (PermissionError, KeyError):
+                pass
+        # 首次在新机器（或宿主机）启动时：如果本机 Vault 还没有 key，自动从内置 llm_secrets.env 导入免费模型凭据
+        try:
+            repo_root = Path(__file__).resolve().parent.parent
+            secrets_file = repo_root / "docs" / "model-api-guide" / "llm_secrets.env"
+            if secrets_file.exists():
+                from agent.provider_config import import_provider_secrets
+                import_provider_secrets(secrets_file.read_text(encoding="utf-8"), vault)
+                k = vault.resolve("agnes_api_key", caller="agent.main")
+                if k:
+                    try:
+                        vault.set("llm_api_key", k)
+                    except Exception:
+                        pass
+                    return k
+        except Exception:
+            pass
+    return ""
 
 
 def resolve_backup_llm_key(vault: Vault) -> str:
@@ -95,10 +132,13 @@ def resolve_backup_llm_key(vault: Vault) -> str:
 
 
 def main() -> None:
-    repo_root = Path(__file__).resolve().parent.parent
-    cfg = load_config()
-    data_dir = Path(os.environ.get("ALTEREGO_DATA", str(repo_root)))
-    data_dir.mkdir(parents=True, exist_ok=True)
+    from agent.paths import resolve_data_dir
+    data_dir = resolve_data_dir()
+    from agent.singleton import SingleInstanceLock
+    instance_lock = SingleInstanceLock(data_dir / "app.lock")
+    if not instance_lock.acquire():
+        print("[AlterEgo] 检测到已有正在运行的实例 (app.lock)，为避免数据库与资源冲突本次启动已停止。")
+        sys.exit(1)
 
     vault = Vault.for_machine(data_dir)
     llm_key = resolve_llm_key(vault)
@@ -120,8 +160,25 @@ def main() -> None:
     llm.set_request_observer(make_llm_request_observer(tracer, channel="cli"))
 
     memory = MemoryManager(data_dir / "memory")
+    experience = ExperienceStore(str(data_dir / "experience.db"))
+    try:
+        experience.decay_job()
+    except Exception:
+        pass
+    skills = SkillManager(data_dir / "skills.json")
+    for tool in make_evolution_tools(memory, skills):
+        if tool.name not in registry:
+            registry.register(tool)
+    skills.register_all(registry)
+    summarizer = None
+    try:
+        from agent.compaction import make_worker_summarizer
+        summarizer = make_worker_summarizer(cfg, vault)
+    except Exception:
+        pass
     ctx = ContextBuilder(max_tokens=cfg["context"]["max_context_tokens"],
-                         extra_system=memory.read_main)
+                         extra_system=memory.read_main,
+                         summarizer=summarizer)
 
     store = SessionStore(str(data_dir / "conversations.db"))
     session_id = store.new_session()
@@ -136,7 +193,7 @@ def main() -> None:
     from agent.subagent import SubagentManager, make_subagent_tools
     def _make_sub_orchestrator(task):
         role = "code" if getattr(task, "kind", "") == "code" and (
-            cfg.get("llm_router", {}).get("enabled") is True
+            (cfg.get("llm_router") or {}).get("enabled") is True
             or "code" in cfg.get("models", {}).get("roles", {})) else "subagent"
         sub_llm = LLMClient.for_role(cfg, role, vault)
         if getattr(task, "critical", False):
@@ -150,10 +207,22 @@ def main() -> None:
             extra_system=sub_prompt,
         )
         return Orchestrator(sub_llm, registry, sub_ctx,
-                            max_iters=15, parallel_tools=False,
+                            max_iters=cfg["agent"].get("subagent_max_iters", 20),
+                            max_iters_hard=cfg["agent"].get("subagent_max_iters_hard", 60),
+                            step_grant=cfg["agent"].get("subagent_step_grant", 10),
+                            max_turn_wall_clock_sec=cfg["agent"].get(
+                                "subagent_max_turn_sec", 300.0),
+                            turn_extension_sec=cfg["agent"].get(
+                                "subagent_turn_extension_sec", 120.0),
+                            turn_max_extensions=cfg["agent"].get(
+                                "subagent_max_extensions", 2),
+                            parallel_tools=False,
                             tracer=tracer, tracker=tracker, planner=None)
 
-    sub_mgr = SubagentManager(make_orchestrator=_make_sub_orchestrator)
+    sub_mgr = SubagentManager(
+        make_orchestrator=_make_sub_orchestrator,
+        store_path=data_dir / "subagents.db",
+    )
     for t in make_subagent_tools(sub_mgr):
         registry.register(t)
 
@@ -184,35 +253,58 @@ def main() -> None:
     def _schedule_once(args: dict) -> str:
         try:
             secs = int(args.get("seconds", 0))
-            brief = args.get("brief", "")
-            if secs <= 0:
-                return "[工具执行失败] seconds 必须 > 0"
+            brief = str(args.get("brief", "") or "").strip()
+            if not brief:
+                return "[工具执行失败] brief 不能为空"
+            if secs <= 0 or secs > 86400:
+                return "[工具执行失败] seconds 须在 1~86400 之间"
             orch_ref = _orch_holder.get("orch")
             if orch_ref is None:
                 return "[工具执行失败] Orchestrator 未就绪"
-            jid = orch_ref.schedule_once(secs, brief)
-            return f"[定时已设置] {secs} 秒后提醒：{brief[:50]}（job={jid}）"
+            result = orch_ref.schedule_once(secs, brief)
+            if result.startswith("[失败]"):
+                return f"[工具执行失败] {result}"
+            return result
         except Exception as e:
             return f"[工具执行失败] {e}"
     registry.register(ToolDefinition(
         name="schedule_once",
-        description="N 秒后提醒我做某事（替代 sleep 硬等）。到时会自动注入提醒。",
+        description="N 秒后提醒我做某事（替代 sleep 硬等）。到时会发 Windows 系统通知，不会注入当前对话。",
         parameters={"type": "object",
                      "properties": {
                          "seconds": {"type": "integer", "description": "几秒后"},
                          "brief": {"type": "string", "description": "到时提醒做什么"}},
                      "required": ["seconds", "brief"]},
         func=_schedule_once,
+        parallel_safe=False,
+        is_readonly=False,
+        cacheable=False,
     ))
 
     orch = Orchestrator(llm, registry, ctx,
                         planner=planner,
                         max_iters=cfg["agent"].get("max_iters", 25),
                         max_iters_hard=cfg["agent"].get("max_iters_hard", 100),
+                        step_grant=cfg["agent"].get("step_grant", 10),
+                        max_turn_wall_clock_sec=cfg["agent"].get(
+                            "max_turn_wall_clock_sec", 600.0),
+                        turn_extension_sec=cfg["agent"].get(
+                            "turn_extension_sec", 180.0),
+                        turn_max_extensions=cfg["agent"].get(
+                            "turn_max_extensions", 3),
                         parallel_tools=cfg["agent"].get("parallel_tools", False),
                         tracer=tracer, tracker=tracker,
                         sub_mgr=sub_mgr)
     _orch_holder["orch"] = orch  # schedule_once 工具闭包绑定
+
+    def _distill_cli_turn(session_id: str):
+        try:
+            run_memory_distill(
+                memory=memory, store=store, tracer=tracer,
+                experience_store=experience, scope="session",
+                session_id=session_id, vault=vault, cfg=cfg)
+        except Exception:
+            pass
 
     print("AlterEgo（输入 quit 退出）")
     try:
@@ -232,6 +324,9 @@ def main() -> None:
             try:
                 # 进 LLM / 日志前的文本先过 vault.scrub（§11）
                 print(f"\n影仔> {vault.scrub(orch.handle(text))}")
+                store.save_history(session_id, orch.history)
+                threading.Thread(
+                    target=_distill_cli_turn, args=(session_id,), daemon=True).start()
             except NotImplementedError as e:
                 print(f"\n[未实现] {e}")
             except Exception as e:  # noqa: BLE001 —— CLI 兜底，不能崩
@@ -248,6 +343,7 @@ def main() -> None:
                 _browser_worker.stop()
             except Exception:
                 pass
+        instance_lock.release()
 
     # [M1-UI 完成] ui/launcher.py 与 ui/server.py 完整实现并已跑通。
 

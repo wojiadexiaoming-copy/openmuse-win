@@ -61,8 +61,14 @@ class _NativeUIA:
     def __init__(self):
         import ctypes
         from ctypes import wintypes
-        from pywinauto.uia_defines import IUIA, get_elem_interface
-        from pywinauto.uia_element_info import UIAElementInfo
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r"Apply externally defined coinit_flags:.*",
+                category=UserWarning,
+            )
+            from pywinauto.uia_defines import IUIA, get_elem_interface
+            from pywinauto.uia_element_info import UIAElementInfo
 
         self.ctypes = ctypes
         self.wintypes = wintypes
@@ -556,7 +562,7 @@ def _execute(operation: str, arguments: dict) -> dict:
                 return _failure("control_ambiguous" if matches else "control_not_found",
                                 window=window_data)
             control = _control_record(matches[0])
-            if not control["enabled"] or not control["focusable"]:
+            if not control["enabled"] or not (control["focusable"] or control["editable"]):
                 return _failure("control_not_focusable", window=window_data)
             backend.set_focus(matches[0])
             for attempt in range(3):

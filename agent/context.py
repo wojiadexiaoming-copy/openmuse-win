@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime
 import json
+import platform
 import re
 from dataclasses import replace
 
@@ -15,6 +17,20 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 def load_system_prompt() -> str:
     return (PROMPTS_DIR / "system.md").read_text(encoding="utf-8")
+
+
+def _runtime_info_text() -> str:
+    now = datetime.now().astimezone()
+    weekdays = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    offset = now.strftime("%z")
+    offset_display = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
+    tz = now.tzname() or ""
+    return (
+        f"- 当前日期：{now.strftime('%Y-%m-%d')}（{weekdays[now.weekday()]}）\n"
+        f"- 当前时间：{now.strftime('%H:%M')} {tz}（UTC{offset_display}）\n"
+        f"- 操作系统：{platform.system()} {platform.release()} ({platform.version()})\n"
+        "- 说明：涉及“今天/明天/后天/几天后”的计算一律以此为准，不要用 shell 猜日期。"
+    )
 
 
 def _protocol_groups(conversation: list[Message]) -> list[tuple[list[Message], bool]]:
@@ -179,15 +195,26 @@ def _protected_context_index(groups):
     # evidence eligible for slimming or remove it from the protected tail.
     return min(latest_tool, latest_desktop) if latest_desktop is not None else latest_tool
 
+def _message_token_cost(message: Message) -> int:
+    text = message.content or ""
+    cjk = len(re.findall(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]', text))
+    other = len(text) - cjk
+    return (cjk // 2) + (other // 3) + 500
+
+
 class ContextBuilder:
     def __init__(self, max_tokens: int = 128000, extra_system: str | Callable[[], str] = "",
-                 max_tool_observations: int = 2):
+                 max_tool_observations: int = 2, summarizer: Callable[[str], str] | None = None):
         self.max_tokens = max_tokens
         self.extra_system = extra_system
         if (isinstance(max_tool_observations, bool) or not isinstance(max_tool_observations, int)
                 or max_tool_observations < 1):
             raise ValueError("max_tool_observations must be a positive integer")
         self.max_tool_observations = max_tool_observations
+        self.summarizer = summarizer
+        # 一次性系统提醒（如「上一进程遗留未完成任务」）：由调用方在回合前后设置/清空，
+        # 只进 system prompt，不落会话历史，避免跨回合重复注入。
+        self.turn_notice = ""
 
     def build(self, conversation: list[Message], tools: list[dict] | None = None) -> list[Message]:
         """组装发给 LLM 的消息列表。动态读取 system.md 与最新记忆，按需注入 Skill。"""
@@ -218,6 +245,12 @@ class ContextBuilder:
                 except Exception:
                     pass
 
+        system_text += "\n\n# 运行时信息\n" + _runtime_info_text()
+
+        notice = (self.turn_notice or "").strip()
+        if notice:
+            system_text += "\n\n# 本轮系统提醒\n" + notice
+
         system = Message(role="system", content=system_text)
         budget = self.max_tokens - len(system_text) // 3
 
@@ -225,7 +258,7 @@ class ContextBuilder:
             _visual_context(_protocol_groups(conversation), self.max_tool_observations))
         if not groups:
             return [system]
-        total_cost = sum(len(message.content) // 3 + 500
+        total_cost = sum(_message_token_cost(message)
                          for messages, _ in groups for message in messages)
         if total_cost > budget and len(conversation) > 4:
             from .compaction import smart_compact
@@ -234,20 +267,30 @@ class ContextBuilder:
             protected = _protected_context_index(groups)
             older = [replace(message, metadata=dict(message.metadata))
                      for messages, _ in groups[:protected] for message in messages]
-            groups = _protocol_groups(smart_compact(older)) + groups[protected:]
+            if self.summarizer is not None:
+                compacted_older = smart_compact(older, self.summarizer)
+            else:
+                compacted_older = smart_compact(older)
+            groups = _protocol_groups(compacted_older) + groups[protected:]
 
         # Keep the latest complete tool interaction and the newer dialogue even
         # when that indivisible interaction exceeds the remaining token budget.
         first = _protected_context_index(groups)
-        used = sum(len(message.content) // 3 + 500
+        used = sum(_message_token_cost(message)
                    for messages, _ in groups[first:] for message in messages)
         for index in range(first - 1, -1, -1):
-            cost = sum(len(message.content) // 3 + 500 for message in groups[index][0])
+            cost = sum(_message_token_cost(message) for message in groups[index][0])
             if used + cost > budget:
                 break
             first = index
             used += cost
         tail = [message for messages, _ in groups[first:] for message in messages]
+        # Preserve historical summary at head if generated and trimmed
+        summary_msg = next((m for messages, _ in groups for m in messages
+                            if m.role == "system" and "[历史摘要]" in m.content), None)
+        if summary_msg is not None and summary_msg not in tail:
+            tail.insert(0, summary_msg)
+
         latest_user = next((message for message in reversed(conversation)
                             if _is_real_user(message)), None)
         goal = latest_user.metadata.get("task_goal") if latest_user else None

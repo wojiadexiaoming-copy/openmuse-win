@@ -1,57 +1,52 @@
-# Python & Bytecode
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-
-# Virtual Environment
 .venv*/
 venv/
-ENV/
-env/
-
-# Pytest & Coverage
 .pytest_cache/
-.coverage
-htmlcov/
-
-# Local Databases & Secrets (Strictly Blocked)
-*.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.sqlite3
-vault/*.bin
-vault-*/
-.api_token
-*.env
-*.env.local
-*.env.*.local
-!*.env.example
-
-# Temporary Runtime Data & Downloads
-downloads/
-screenshots/
-shots/
-shot_*.jpg
-desktop_shot_*.jpg
-scratch/
-archive/
-artifacts/
-logs/
-data/
-workspace/
-weixin/
-
-# Personal Notes & Development Scratch
-*问题*.md
-MEMORY.md
-PROGRESS.md
-LICENSE_STATUS.md
-
-
-# OS Specific
+browsers/
 .DS_Store
 Thumbs.db
-desktop.ini
+*.log
+logs/
+.api_token
+*.sqlite
+conversations.db*
+approvals.db*
+cache.db*
+spans.db*
+*.db-shm
+*.db-wal
+vault/*.db
+vault-*/
+uploads/
+downloads/
+desktop_shot_*.jpg
+scratch/
+data/
+archive/
+screenshots/
+shots/
+workspace/
+alterego_desktop_runtime/
+artifacts/
+pytest-of-*/
+tmp*
+*.lock
+app.lock
+settings.json
+custom_models.json
+ui/形象/
+weixin/
+
+# Provider credentials are imported into local Vault, never committed
+llm_secrets.env
+*.env
+!*.env.example
+vault/*.bin
+
+# v2.4 SEC-07: 含历史明文密钥的一次性测试脚本，仅保留本地副本待轮换后删除
+docs/速率测试.py
+docs/测试谷歌Gemini 4 Argon速率.py
+
+# v2 UI 迁移（P0，MIGRATION.md §5）：Node 依赖只入库 package.json + package-lock.json
+node_modules/

@@ -42,6 +42,15 @@ class FakeLoc:
         return self._val
 
     def evaluate(self, js, *args):
+        if "ae-fill-mark" in js:
+            return {
+                "ok": True,
+                "tag": "input#email",
+                "is_input": True,
+                "is_contenteditable": False,
+                "focused": True,
+                "active_tag": "input#email",
+            }
         return self._val or "val"
 
     def locator(self, sub_sel):
@@ -106,6 +115,29 @@ class FakePage:
         self._handlers[event] = handler
 
     def evaluate(self, js, *a):
+        if "ae-fill-state" in js:
+            return {
+                "found": True,
+                "focused": True,
+                "tag": "input#email",
+                "active_tag": "input#email",
+                "is_input": True,
+                "is_contenteditable": False,
+                "current_value": self.input_val or "",
+            }
+        if "ae-fill-reset" in js:
+            return True
+        if "ae-fill-clear" in js:
+            self.input_val = ""
+            return True
+        if "ae-fill-write-input" in js or "ae-fill-write-ce" in js:
+            if a and isinstance(a[0], str):
+                self.input_val = a[0]
+            return True
+        if "ae-fill-focus" in js or "ae-fill-blur" in js:
+            return True
+        if "ae-fill-in-modal" in js:
+            return False
         # 页面指纹返回
         if "document.documentElement" in js or "document.title" in js:
             return "Test Title|100|12345"
@@ -173,6 +205,20 @@ def make_test_worker(existing_refs=("ae1", "ae2")):
             "w": 200,
             "h": 30,
         },
+        {
+            "ref": "ae3",
+            "id": 3,
+            "tag": "div",
+            "role": "icon",
+            "is_editable": False,
+            "in_modal": False,
+            "icon_only": True,
+            "name": "[图标按钮]",
+            "x": 600,
+            "y": 500,
+            "w": 32,
+            "h": 32,
+        },
     ]
     w._get_viewport = lambda: {"width": 1000, "height": 800}
     return w
@@ -183,6 +229,9 @@ def test_snapshot_includes_ref_tags():
     out = w._do_snapshot({})
     assert "[ref=ae1]" in out
     assert "[ref=ae2]" in out
+    assert "[ref=ae3]" in out
+    assert "[图标按钮]" in out
+    assert "已可直接按 ref 点击" in out
     assert "[ref 规则]" in out
     assert "browser_click(ref=\"aeN\")" in out
 
@@ -272,15 +321,17 @@ def test_clean_screenshot_som_toggle():
     w._raw_page.evaluate = fake_eval
     w._raw_page.screenshot = fake_screenshot
 
-    # clean=False (默认): evaluate 传 clean=False (保留 SoM)
+    # clean=False (默认): 先 pulse 回显瞬态 SoM 框选，再按 clean=False 隐藏自绘遮罩
     w._clean_screenshot(clean=False)
-    assert len(eval_calls) >= 2
-    assert eval_calls[0][1] == (False,)
+    assert len(eval_calls) >= 3
+    assert "__ae_som_pulse" in eval_calls[0][0]
+    assert eval_calls[1][1] == (False,)
 
-    # clean=True: evaluate 传 clean=True (隐藏 SoM)
+    # clean=True: 不 pulse，直接 evaluate 传 clean=True (隐藏 SoM)
     eval_calls.clear()
     w._clean_screenshot(clean=True)
     assert len(eval_calls) >= 2
+    assert "__ae_som_pulse" not in eval_calls[0][0]
     assert eval_calls[0][1] == (True,)
 
     # Tool schema 包含 clean 参数

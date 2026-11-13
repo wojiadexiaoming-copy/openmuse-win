@@ -163,6 +163,9 @@ def make_workflow_tools(engine: "WorkflowEngine"):
                              "inputs": {"type": "object"}},
                          "required": ["workflow_id"]},
             func=_start,
+            parallel_safe=False,
+            is_readonly=False,
+            cacheable=False,
         ),
         ToolDefinition(
             name="workflow_status",
@@ -171,6 +174,9 @@ def make_workflow_tools(engine: "WorkflowEngine"):
                          "properties": {"run_id": {"type": "string"}},
                          "required": ["run_id"]},
             func=_status,
+            parallel_safe=True,
+            is_readonly=True,
+            cacheable=False,
         ),
         ToolDefinition(
             name="workflow_complete_step",
@@ -182,5 +188,8 @@ def make_workflow_tools(engine: "WorkflowEngine"):
                              "result": {"type": "object"}},
                          "required": ["run_id"]},
             func=_complete,
+            parallel_safe=False,
+            is_readonly=False,
+            cacheable=False,
         ),
     ]

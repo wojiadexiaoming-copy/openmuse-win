@@ -1,7 +1,7 @@
 # AlterEgo Web UI · 接口与数据架构
 
-> 后端：Flask（`ui/server.py`），默认 `http://localhost:5000`。
-> 本机单机部署，无需鉴权；如需局域网手机访问，加 `Authorization: Bearer <token>`（token 存 Vault）。
+> 后端：Bottle + WSGI 多线程服务（`ui/server.py`），默认 `http://localhost:5000`。
+> 安全策略：全局 API Token 认证。服务端启动时读取或生成 Token（持久化至 `<data_dir>/.api_token`），所有 `/api/*` 请求（除 `/api/health` 与免认证静态资源外）必须携带 `Authorization: Bearer <token>`、`X-AlterEgo-Token: <token>` 或 `?token=<token>`。
 
 ---
 
@@ -176,6 +176,20 @@ interface TakeoverStatus {
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/uploads` | multipart/form-data，返回 `{"upload_id": "...", "url": "/uploads/..."}` |
+
+### 2.7 备份与恢复（§34）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/backup` | 列出所有历史备份压缩包清单（名称、大小、创建时间） |
+| POST | `/api/backup` | 触发立即备份（默认）；或传入 `{"action": "verify"}` 进行恢复自检 |
+
+### 2.8 会话恢复与断点提示
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/pending_resume` | 查询是否有意外中断的未完成任务需要提示用户继续/丢弃 |
+| POST | `/api/dismiss_resume` | 用户选择丢弃未完成任务并清除提示 |
 
 ---
 

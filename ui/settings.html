@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AlterEgo - 系统设置与模型密钥配置中心</title>
+  <link rel="icon" type="image/png" href="static/alterego.png">
+  <script src="static/tailwind.min.js"></script>
+  <link rel="stylesheet" href="static/style.css">
+  <style>
+    body { background-color: #F8F9FA; }
+    .card-shadow { box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 2px 6px -1px rgba(0, 0, 0, 0.03); }
+    .pill-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 500; }
+  </style>
+</head>
+<body class="min-h-screen text-[#1D1D1F] font-sans antialiased">
+
+  <!-- 顶部独立导航栏 -->
+  <header class="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-[#EAEAEA] px-6 py-3.5">
+    <div class="max-w-5xl mx-auto flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <img src="static/alterego.png" class="w-7 h-7 rounded-lg shadow-sm" alt="AlterEgo">
+        <div>
+          <div class="flex items-center space-x-2">
+            <h1 class="text-[17px] font-bold tracking-tight text-[#1D1D1F]">AlterEgo 设置中心</h1>
+            <span class="pill-badge bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span>
+              独立大窗口模式
+            </span>
+            <span class="pill-badge bg-blue-50 text-blue-700 border border-blue-200/60">
+              🔐 Windows DPAPI 硬件加密
+            </span>
+          </div>
+          <p class="text-[11.5px] text-[#8E8E93]">宽屏全览 · 按角色分级绑定 · 模型密钥热重载 · 永存物理 Vault</p>
+        </div>
+      </div>
+      <div class="flex items-center space-x-2.5">
+        <button onclick="closeSettingsWindow()" class="px-3 py-1.5 rounded-lg border border-[#EAEAEA] hover:bg-gray-100 text-xs font-medium text-gray-600 transition flex items-center space-x-1">
+          <span>✕ 关闭窗口</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 主体内容区域 -->
+  <main class="max-w-5xl mx-auto px-6 py-6 space-y-6">
+
+    <!-- 1. 各角色当前模型绑定拓扑矩阵 (5 列全景卡片) -->
+    <section class="bg-white rounded-2xl border border-[#EAEAEA] card-shadow p-5 space-y-3">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-[15px] font-bold text-[#1D1D1F] flex items-center space-x-2">
+            <span>🎭 角色模型分级拓扑矩阵</span>
+            <span class="text-xs font-normal text-gray-400">（点击任一卡片直接载入下方编辑）</span>
+          </h2>
+          <p class="text-xs text-[#8E8E93] mt-0.5">支持按不同角色精细化配置不同模型，主脑用旗舰模型，工作者用极速模型，主脑异常自动无缝降级至兜底。</p>
+        </div>
+        <button onclick="loadAllSettings()" class="text-xs text-blue-600 hover:text-blue-800 font-medium transition">
+          🔄 刷新拓扑
+        </button>
+      </div>
+
+      <div id="role-matrix-grid" class="grid grid-cols-1 sm:grid-cols-5 gap-3 pt-1">
+        <!-- 动态生成 5 个角色卡片 -->
+        <div class="p-3 rounded-xl border border-dashed border-gray-200 text-center text-xs text-gray-400">加载角色拓扑中...</div>
+      </div>
+    </section>
+
+    <!-- 2. 模型与密钥一体化配置面板 -->
+    <section class="bg-white rounded-2xl border border-[#EAEAEA] card-shadow p-6 space-y-5">
+      <div class="border-b border-[#EAEAEA] pb-3 flex items-center justify-between">
+        <div>
+          <h2 class="text-[15px] font-bold text-[#1D1D1F] flex items-center space-x-2">
+            <span>⚙️ 模型参数与安全密钥配置</span>
+            <span id="current-editing-role-badge" class="pill-badge bg-blue-100 text-blue-700">正在配置: 👑 主脑 (Main)</span>
+          </h2>
+          <p class="text-xs text-[#8E8E93] mt-0.5">保存时密钥将经由系统底层 Crypt32.dll 硬件级加密落盘至本地 Vault，内存按需解密，永不输出明文。</p>
+        </div>
+        <span id="vault-key-status" class="text-xs font-medium text-emerald-600">✓ 已保护</span>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-12 gap-5">
+
+        <!-- 左侧/上方：目标角色与模型标识 (5 栏) -->
+        <div class="md:col-span-5 space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-[#4B5563] mb-1.5">生效目标角色 (Role)</label>
+            <div class="relative">
+              <select id="setting-target-role" onchange="onRoleChange(this.value)" class="w-full px-3 py-2 bg-[#F9F9FB] focus:bg-white rounded-xl border border-[#EAEAEA] focus:border-blue-500 text-xs font-medium text-[#1D1D1F] transition focus:outline-none">
+                <option value="main">👑 主脑 (Main Brain) - 核心推理与任务决策</option>
+                <option value="worker">⚡ 后台工作者 (Worker) - 记忆提炼与后台任务</option>
+                <option value="subagent">🤖 子任务 (Subagent) - 并行拆解执行</option>
+                <option value="planner">📋 规划器 (Planner) - 长程目标分解</option>
+                <option value="fallback">🛡️ 容灾兜底 (Fallback) - 主模型异常时自动回落</option>
+                <option value="all">🌐 全部角色统一部署 (All Roles)</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex items-center justify-between mb-1.5">
+              <label class="block text-xs font-bold text-[#4B5563]">模型标识 (Model ID)</label>
+              <span class="text-[11px] text-gray-400">支持预设与自定义 ID</span>
+            </div>
+            <div class="relative">
+              <input type="text" id="setting-model" placeholder="点击选择已有模型，或直接输入新模型 ID" class="w-full px-3 py-2 bg-[#F9F9FB] focus:bg-white rounded-xl border border-[#EAEAEA] focus:border-blue-500 text-xs font-mono font-medium text-[#1D1D1F] transition focus:outline-none" autocomplete="off" onfocus="toggleModelDropdown(true)" onclick="toggleModelDropdown(true)" oninput="filterModelDropdown(this.value)">
+              <!-- 点击输入框展开的模型下拉列表 -->
+              <div id="setting-model-dropdown" class="hidden absolute left-0 right-0 top-full mt-1.5 max-h-64 overflow-y-auto bg-white rounded-xl border border-gray-200 card-shadow z-50 divide-y divide-gray-100">
+                <!-- 动态填充模型列表与删除按钮 -->
+              </div>
+            </div>
+
+            <!-- 可用模型一键选择标签组 (包含预设与自定义，支持点击填入，点 ✕ 删除非锚点模型) -->
+            <div class="mt-3 pt-2.5 border-t border-dashed border-gray-200">
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="text-[11px] font-bold text-[#4B5563] flex items-center space-x-1">
+                  <span>✨ 可用模型标签</span>
+                  <span class="text-[10px] text-gray-400 font-normal">（点击填入，点 ✕ 删除）</span>
+                </span>
+                <span class="text-[10px] text-emerald-600 font-medium">⚡ auto 核心兜底不可删除</span>
+              </div>
+              <div id="all-models-chips" class="flex flex-wrap gap-1.5">
+                <span class="text-[10.5px] text-gray-400">加载模型标签中...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右侧/下方：端点 Base URL 与 API Key (7 栏) -->
+        <div class="md:col-span-7 space-y-4">
+          <div>
+            <div class="flex items-center justify-between mb-1.5">
+              <label class="block text-xs font-bold text-[#4B5563]">API 基础地址 (Base URL)</label>
+              <span class="text-[11px] text-gray-400">OpenAI / Anthropic 兼容端点</span>
+            </div>
+            <input type="text" id="setting-base-url" placeholder="例如: http://127.0.0.1:53683/v1" class="w-full px-3 py-2 bg-[#F9F9FB] focus:bg-white rounded-xl border border-[#EAEAEA] focus:border-blue-500 text-xs font-mono text-[#1D1D1F] transition focus:outline-none">
+
+            <!-- 常用端点快速填入药丸标签 -->
+            <div class="mt-2 flex flex-wrap gap-1.5">
+              <button type="button" onclick="quickFillBaseUrl('http://127.0.0.1:53683/v1')" class="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 text-[10.5px] border border-blue-200 transition">
+                本地代理 (127.0.0.1:53683)
+              </button>
+              <button type="button" onclick="quickFillBaseUrl('http://192.168.137.1:53683/v1')" class="px-2 py-0.5 rounded bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10.5px] border border-purple-200 transition" title="Hyper-V 虚拟机访问宿主机">
+                宿主机代理 (192.168.137.1:53683)
+              </button>
+              <button type="button" onclick="quickFillBaseUrl('https://api.deepseek.com/v1')" class="px-2 py-0.5 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10.5px] transition">
+                DeepSeek 官方
+              </button>
+              <button type="button" onclick="quickFillBaseUrl('https://api.openai.com/v1')" class="px-2 py-0.5 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10.5px] transition">
+                OpenAI 官方
+              </button>
+              <button type="button" onclick="quickFillBaseUrl('https://apihub.agnes-ai.com/v1')" class="px-2 py-0.5 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10.5px] transition">
+                Agnes AI
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex items-center justify-between mb-1.5">
+              <label class="block text-xs font-bold text-[#4B5563]">API Key 访问密钥</label>
+              <span id="setting-key-status-text" class="text-xs text-emerald-600 font-medium">✓ 已配置硬件加密凭证</span>
+            </div>
+            <div class="relative flex items-center">
+              <input type="password" id="setting-api-key" placeholder="录入 API Key (sk-... 或 eb-local-...)，留空则保持现有密钥" class="w-full px-3 py-2 pr-10 border border-[#EAEAEA] focus:border-blue-500 rounded-xl text-xs font-mono focus:outline-none bg-[#F9F9FB] focus:bg-white transition">
+              <button type="button" onclick="toggleKeyVisibility()" class="absolute right-3 text-gray-400 hover:text-gray-700 text-xs focus:outline-none" title="切换显示明文/密文">
+                👁️
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-400 mt-1">留空表示沿用 Vault 中当前端点已存储的硬件密文；输入新 Key 保存后会自动覆盖更新。</p>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- 操作与测试结果栏 -->
+      <div class="pt-3 border-t border-[#EAEAEA] flex items-center justify-between">
+        <div class="flex items-center space-x-3">
+          <button type="button" id="btn-test-llm" onclick="handleTestLlm()" class="px-4 py-2 rounded-xl bg-[#F4F4F5] hover:bg-gray-200 text-[#1D1D1F] font-semibold text-xs transition flex items-center space-x-1.5">
+            <span>⚡ 连通性测试</span>
+          </button>
+          <span id="llm-test-result" class="text-xs text-gray-500 font-medium"></span>
+        </div>
+        <div class="flex items-center space-x-2.5">
+          <button type="button" onclick="saveModelConfig()" class="px-6 py-2 rounded-xl bg-[#18181B] hover:bg-black text-white text-xs font-bold transition shadow-sm flex items-center space-x-1.5">
+            <span>💾 保存并立即生效</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. 底部快捷辅助卡片组 (SOUL 设定 + 微信 ClawBot) -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+
+      <!-- SOUL 核心人设设定 -->
+      <section class="bg-white rounded-2xl border border-[#EAEAEA] card-shadow p-5 space-y-3">
+        <div class="flex items-center justify-between border-b border-[#EAEAEA] pb-2.5">
+          <h3 class="text-xs font-bold text-[#1D1D1F] flex items-center space-x-1.5">
+            <span>🧠 SOUL · 智能体灵魂与执行准则</span>
+          </h3>
+          <button onclick="saveSoulConfig()" class="text-xs text-rose-600 hover:text-rose-800 font-medium transition">
+            保存人设
+          </button>
+        </div>
+        <textarea id="soul-text" rows="6" class="w-full p-3 rounded-xl border border-[#EAEAEA] bg-[#F9F9FB] text-xs font-mono leading-relaxed focus:outline-none focus:border-rose-400" placeholder="角色定义与人设规则..."></textarea>
+      </section>
+
+      <!-- 微信 ClawBot 远程免键鼠绑定 -->
+      <section class="bg-white rounded-2xl border border-[#EAEAEA] card-shadow p-5 space-y-3">
+        <div class="flex items-center justify-between border-b border-[#EAEAEA] pb-2.5">
+          <h3 class="text-xs font-bold text-[#1D1D1F] flex items-center space-x-1.5">
+            <span>📱 微信 ClawBot 免键鼠远程控制</span>
+          </h3>
+          <span id="weixin-badge" class="pill-badge bg-gray-100 text-gray-600">○ 检查中...</span>
+        </div>
+        <p class="text-xs text-[#8E8E93]">通过手机微信接收告警、下发自动化任务或回复「同意」进行远程审批。</p>
+        <div class="flex items-center justify-between pt-1">
+          <button onclick="generateWeixinQr()" class="px-3.5 py-1.5 bg-[#10B981] hover:bg-emerald-600 text-white rounded-lg text-xs font-semibold transition">
+            生成登录二维码
+          </button>
+          <div id="weixin-qr-container" class="w-20 h-20 bg-gray-50 border border-dashed border-gray-200 rounded-lg flex items-center justify-center text-[10px] text-gray-400">
+            暂无码
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+  </main>
+
+  <!-- 提示弹窗 (Toast) -->
+  <div id="toast" class="fixed bottom-6 right-6 hidden bg-[#18181B] text-white text-xs px-4 py-2.5 rounded-xl shadow-2xl z-50 transition-all font-medium flex items-center space-x-2">
+    <span id="toast-icon">✓</span>
+    <span id="toast-msg">操作成功</span>
+  </div>
+
+  <script>
+    let apiToken = "";
+    let availableModels = [];
+    let currentRoles = {};
+
+    /* EchoBird 的内部模型 ID 固定为 auto；UI 只展示 EchoBird。 */
+    function modelDisplayName(modelId) {
+      const id = (modelId || "").trim();
+      const m = (availableModels || []).find(x => x.id === id);
+      if (m && m.id === "auto") return m.display_name || m.name || "EchoBird";
+      if (id === "auto") return "EchoBird";
+      return modelId;
+    }
+
+    function modelDisplayId(model) {
+      if (!model) return "";
+      if (model.id === "auto") return model.display_id || model.display_name || model.name || "EchoBird";
+      return model.id;
+    }
+
+    function resolveModelIdFromInput(value) {
+      const typed = (value || "").trim();
+      if (!typed) return "";
+      const byId = (availableModels || []).find(m => m.id === typed);
+      if (byId) return byId.id;
+      const byName = (availableModels || []).find(m =>
+        ((m.display_name || m.name || "").toLowerCase() === typed.toLowerCase())
+      );
+      if (byName) return byName.id;
+      if (typed.toLowerCase() === "echobird") return "auto";
+      return typed;
+    }
+
+    function setSettingModelInput(modelId) {
+      const input = document.getElementById("setting-model");
+      if (!input) return;
+      const id = (modelId || "").trim();
+      input.dataset.modelId = id;
+      input.value = modelDisplayName(id);
+    }
+
+    function getSettingModelId() {
+      const input = document.getElementById("setting-model");
+      if (!input) return "";
+      const typed = (input.value || "").trim();
+      const byDisplay = (availableModels || []).find(m =>
+        m.id === "auto" && ((m.display_name || m.name || "").toLowerCase() === typed.toLowerCase())
+      );
+      if (byDisplay) return byDisplay.id;
+      const datasetId = input.dataset.modelId;
+      if (datasetId) {
+        const selected = (availableModels || []).find(m => m.id === datasetId);
+        if (typed === datasetId
+            || (selected && (typed === selected.id || typed === selected.name || typed === selected.display_name))) {
+          return datasetId;
+        }
+      }
+      return resolveModelIdFromInput(typed);
+    }
+
+    // 初始化获取 Token
+    (function initAuth() {
+      const urlParams = new URLSearchParams(window.location.search);
+      apiToken = urlParams.get("token") || localStorage.getItem("alterego_api_token") || "";
+      if (apiToken) {
+        localStorage.setItem("alterego_api_token", apiToken);
+      }
+    })();
+
+    function closeSettingsWindow() {
+      try {
+        if (window.pywebview && window.pywebview.api && window.pywebview.api.close) {
+          window.pywebview.api.close();
+          return;
+        }
+      } catch (e) {}
+      window.close();
+    }
+
+    async function api(path, opts = {}) {
+      const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+      if (apiToken) {
+        headers["Authorization"] = `Bearer ${apiToken}`;
+      }
+      const res = await fetch(path, { ...opts, headers });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      return res.json();
+    }
+
+    function showToast(msg, isError = false) {
+      const t = document.getElementById("toast");
+      const text = document.getElementById("toast-msg");
+      const icon = document.getElementById("toast-icon");
+      if (!t || !text) return;
+      text.textContent = msg;
+      icon.textContent = isError ? "⚠️" : "✓";
+      t.className = `fixed bottom-6 right-6 bg-${isError ? 'red-600' : '[#18181B]'} text-white text-xs px-4 py-2.5 rounded-xl shadow-2xl z-50 transition-all font-medium flex items-center space-x-2`;
+      t.classList.remove("hidden");
+      setTimeout(() => t.classList.add("hidden"), 3500);
+    }
+
+    const ROLE_NAMES = {
+      main: "👑 主脑 (Main)",
+      worker: "⚡ 后台工作者 (Worker)",
+      subagent: "🤖 子任务 (Subagent)",
+      planner: "📋 规划器 (Planner)",
+      fallback: "🛡️ 容灾兜底 (Fallback)"
+    };
+
+    async function loadAllSettings() {
+      try {
+        const res = await api("/api/models");
+        availableModels = res.models || [];
+        currentRoles = res.roles || {};
+        renderRoleCards(currentRoles);
+        renderAllModelChips();
+
+        const activeRole = document.getElementById("setting-target-role").value || "main";
+        populateRoleFields(activeRole);
+
+        // 载入微信与 SOUL 状态
+        loadWeixinStatus();
+        loadSoul();
+      } catch (e) {
+        showToast("加载设置失败: " + e.message, true);
+      }
+    }
+
+    function renderRoleCards(roles) {
+      const grid = document.getElementById("role-matrix-grid");
+      if (!grid) return;
+      const order = ["main", "worker", "subagent", "planner", "fallback"];
+      const activeRole = document.getElementById("setting-target-role").value || "main";
+
+      grid.innerHTML = order.map(rKey => {
+        const r = roles[rKey] || {};
+        const isSelected = (rKey === activeRole);
+        const name = ROLE_NAMES[rKey] || rKey;
+        const shortUrl = (r.base_url || "").replace(/^https?:\/\//, "").replace(/\/v1\/?$/, "");
+
+        return `
+          <div onclick="selectRoleCard('${rKey}')" class="p-3 rounded-xl border transition cursor-pointer flex flex-col justify-between ${isSelected ? 'border-blue-600 bg-blue-50/50 shadow-sm' : 'border-[#EAEAEA] bg-[#F9F9FB] hover:border-gray-300'}">
+            <div>
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="text-xs font-bold text-[#1D1D1F] truncate">${name.split(" ")[0]}</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded font-medium ${isSelected ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600'}">${rKey}</span>
+              </div>
+              <div class="text-[13px] font-bold text-[#18181B] truncate" title="${modelDisplayName(r.model) || '未绑定'}">${modelDisplayName(r.model) || '未绑定'}</div>
+              <div class="mt-1 flex items-center space-x-1">
+                <span class="text-[9.5px] px-1.5 py-0.2 rounded font-medium ${r.has_key ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/60' : 'bg-amber-50 text-amber-700 border border-amber-200/60'}">
+                  ${r.has_key ? '✓ 密钥就绪' : '需配 Key'}
+                </span>
+              </div>
+            </div>
+            <div class="text-[10.5px] text-[#8E8E93] truncate mt-2 font-mono" title="${r.base_url || ''}">
+              ${shortUrl || '默认端点'}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function selectRoleCard(roleKey) {
+      const select = document.getElementById("setting-target-role");
+      if (select) select.value = roleKey;
+      onRoleChange(roleKey);
+    }
+
+    function onRoleChange(roleKey) {
+      document.getElementById("current-editing-role-badge").textContent = `正在配置: ${ROLE_NAMES[roleKey] || roleKey}`;
+      populateRoleFields(roleKey);
+      renderRoleCards(currentRoles);
+    }
+
+    function populateRoleFields(roleKey) {
+      const r = currentRoles[roleKey] || {};
+      const uInput = document.getElementById("setting-base-url");
+      const kInput = document.getElementById("setting-api-key");
+      if (r.model) setSettingModelInput(r.model);
+      if (uInput && r.base_url) uInput.value = r.base_url;
+      if (kInput) kInput.value = ""; // 密钥清空，留空表示沿用
+      updateKeyStatusText();
+    }
+
+    function quickFillModel(modelId, baseUrl) {
+      setSettingModelInput(modelId);
+      if (baseUrl) {
+        document.getElementById("setting-base-url").value = baseUrl;
+      }
+      updateKeyStatusText();
+    }
+
+    function quickFillBaseUrl(url) {
+      document.getElementById("setting-base-url").value = url;
+    }
+
+    function toggleKeyVisibility() {
+      const kInput = document.getElementById("setting-api-key");
+      if (!kInput) return;
+      kInput.type = (kInput.type === "password") ? "text" : "password";
+    }
+
+    function updateKeyStatusText() {
+      const modelId = getSettingModelId();
+      const statusEl = document.getElementById("setting-key-status-text");
+      if (!statusEl) return;
+      const m = availableModels.find(x => x.id === modelId);
+      if (m && m.has_key) {
+        statusEl.className = "text-xs text-emerald-600 font-medium";
+        statusEl.textContent = "✓ 当前端点已有硬件加密凭证 (留空保持现有密钥)";
+      } else {
+        statusEl.className = "text-xs text-gray-500 font-medium";
+        statusEl.textContent = "留空保持现有凭证，或填入新 Key 覆盖";
+      }
+    }
+
+    function escapeHtml(str) {
+      return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+    function escapeJs(str) {
+      return (str || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    }
+
+    function toggleModelDropdown(forceOpen) {
+      const dd = document.getElementById("setting-model-dropdown");
+      if (!dd) return;
+      const shouldOpen = (typeof forceOpen === "boolean") ? forceOpen : dd.classList.contains("hidden");
+      if (shouldOpen) {
+        const inputVal = document.getElementById("setting-model")?.value || "";
+        renderModelDropdown(inputVal);
+        dd.classList.remove("hidden");
+      } else {
+        dd.classList.add("hidden");
+      }
+    }
+
+    function filterModelDropdown(val) {
+      toggleModelDropdown(true);
+      renderModelDropdown(val);
+    }
+
+    function selectDropdownModel(modelId, baseUrl) {
+      const uInput = document.getElementById("setting-base-url");
+      setSettingModelInput(modelId);
+      if (uInput && baseUrl) uInput.value = baseUrl;
+      toggleModelDropdown(false);
+      updateKeyStatusText();
+    }
+
+    function renderModelDropdown(filterText = "") {
+      const dd = document.getElementById("setting-model-dropdown");
+      if (!dd) return;
+      let list = availableModels || [];
+      const q = (filterText || "").trim().toLowerCase();
+      if (q) {
+        list = list.filter(m =>
+          (m.name || "").toLowerCase().includes(q) ||
+          (m.id || "").toLowerCase().includes(q) ||
+          (m.display_name || "").toLowerCase().includes(q) ||
+          (m.tag || "").toLowerCase().includes(q)
+        );
+      }
+      if (!list.length) {
+        dd.innerHTML = `<div class="p-3 text-center text-gray-400 text-xs">暂无匹配模型（可直接输入自定义新模型 ID 并保存）</div>`;
+        return;
+      }
+      const anchorId = (availableModels && availableModels[0] && availableModels[0].id) || "auto";
+      dd.innerHTML = list.map(m => {
+        const keyHint = m.has_key
+          ? `<span class="text-[10px] text-emerald-600 font-medium">✓ 已配密钥</span>`
+          : `<span class="text-[10px] text-gray-400">需填 Key</span>`;
+        const tagHint = m.tag ? `<span class="text-[9.5px] px-1.5 py-0.2 rounded bg-gray-100 text-gray-600 font-normal">${escapeHtml(m.tag)}</span>` : "";
+        const isDeletable = m.id !== anchorId;
+        return `
+          <div onclick="selectDropdownModel('${escapeJs(m.id)}', '${escapeJs(m.base_url || '')}')" class="group px-3 py-2 hover:bg-blue-50 cursor-pointer flex items-center justify-between border-b border-gray-50 last:border-b-0 transition">
+            <div class="min-w-0 pr-2">
+              <div class="font-semibold text-[#1D1D1F] text-xs flex items-center space-x-1.5 truncate">
+                <span>${escapeHtml(m.name || m.id)}</span>
+                ${tagHint}
+              </div>
+              <div class="text-[10.5px] text-[#8E8E93] truncate font-mono mt-0.5">${escapeHtml(modelDisplayId(m))}</div>
+              ${m.base_url ? `<div class="text-[9.5px] text-gray-400 truncate">${escapeHtml(m.base_url)}</div>` : ''}
+            </div>
+            <div class="shrink-0 flex items-center space-x-2 text-right">
+              ${keyHint}
+              ${isDeletable ? `
+                <button type="button" onclick="event.stopPropagation(); deleteModel('${escapeJs(m.id)}')" class="text-xs text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-0.5 rounded border border-red-200/60 font-medium transition shrink-0 ml-1.5" title="删除该模型（使用该模型的渠道将自动回退至第一个可用模型）">
+                  删除
+                </button>
+              ` : '<span class="text-[10.5px] text-gray-300 select-none px-1" title="核心容灾锚点不可删除">🔒</span>'}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderAllModelChips() {
+      const container = document.getElementById("all-models-chips");
+      if (!container) return;
+      if (!availableModels || !availableModels.length) {
+        container.innerHTML = `<span class="text-[10.5px] text-gray-400">暂无模型</span>`;
+        return;
+      }
+      const anchorId = (availableModels && availableModels[0] && availableModels[0].id) || "auto";
+      container.innerHTML = availableModels.map(m => {
+        const id = m.id;
+        const bUrl = m.base_url || "";
+        const isAnchor = id === anchorId;
+        const colorClass = isAnchor
+          ? "bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200"
+          : (m.is_custom || m.group === "custom")
+            ? "bg-purple-50 hover:bg-purple-100 text-purple-800 border-purple-200"
+            : "bg-gray-100 hover:bg-gray-200 text-gray-800 border-gray-200";
+
+        return `
+          <div class="group inline-flex items-center pl-2 pr-1.5 py-1 rounded-md text-[11px] font-medium border transition ${colorClass}">
+            <span onclick="quickFillModel('${escapeJs(id)}', '${escapeJs(bUrl)}')" class="cursor-pointer font-mono" title="${m.desc || id} (${bUrl || '默认端点'})">
+              ${isAnchor ? '⚡ ' : ''}${escapeHtml(m.name || id)}
+            </span>
+            ${!isAnchor ? `
+              <button type="button" onclick="event.stopPropagation(); deleteModel('${escapeJs(id)}')" class="ml-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 px-1 py-0.2 rounded transition text-[10px] font-bold" title="删除该模型（使用该模型的渠道将自动回退至第一个可用模型）">
+                ✕
+              </button>
+            ` : ''}
+          </div>
+        `;
+      }).join("");
+    }
+
+    // 点击外部自动收起模型下拉菜单
+    document.addEventListener("click", function(e) {
+      const input = document.getElementById("setting-model");
+      const dd = document.getElementById("setting-model-dropdown");
+      if (dd && !dd.contains(e.target) && e.target !== input) {
+        dd.classList.add("hidden");
+      }
+    });
+
+    async function deleteModel(modelId) {
+      if (!confirm(`确定要删除模型 "${modelId}" 吗？\n如果任意渠道（主脑/工作者/子智能体/规划器/容灾兜底）正使用该模型，将默认回退至第一个可用模型。`)) return;
+      try {
+        const res = await api(`/api/models/${encodeURIComponent(modelId)}`, { method: "DELETE" });
+        if (res.ok) {
+          if (res.reset_roles && res.reset_roles.length > 0) {
+            const roleLabels = {
+              main: "主脑", worker: "工作者", subagent: "子任务",
+              planner: "规划器", fallback: "容灾兜底"
+            };
+            const rNames = res.reset_roles.map(r => roleLabels[r] || r).join("、");
+            showToast(`已删除模型 "${modelId}"，对应渠道 [${rNames}] 已自动回退至 "${res.fallback_model}"`);
+          } else {
+            showToast(`已删除模型: ${modelId}`);
+          }
+          if (res.models) availableModels = res.models;
+          if (res.roles) {
+            currentRoles = res.roles;
+            renderRoleCards(currentRoles);
+            const activeRole = document.getElementById("setting-target-role")?.value || "main";
+            populateRoleFields(activeRole);
+          }
+          renderAllModelChips();
+          renderModelDropdown();
+          await loadAllSettings();
+        } else {
+          showToast("删除失败: " + (res.error || "未知错误"), true);
+        }
+      } catch (e) {
+        showToast("删除请求失败: " + e.message, true);
+      }
+    }
+
+    async function handleTestLlm() {
+      const resultEl = document.getElementById("llm-test-result");
+      const btn = document.getElementById("btn-test-llm");
+      const model = getSettingModelId();
+      const base_url = document.getElementById("setting-base-url").value.trim();
+      const api_key = document.getElementById("setting-api-key").value.trim();
+
+      if (!model) {
+        showToast("请先输入或选择模型 ID", true);
+        return;
+      }
+
+      resultEl.innerHTML = `<span class="text-blue-600 animate-pulse">正在发送连通性测试请求...</span>`;
+      btn.disabled = true;
+
+      const t0 = performance.now();
+      try {
+        const res = await api("/api/settings/test_llm", {
+          method: "POST",
+          body: JSON.stringify({ model, base_url, api_key })
+        });
+        const elapsed = Math.round(performance.now() - t0);
+        if (res.status === "ok") {
+          const routeHint = res.route ? ` · 实际路由: ${escapeHtml(res.route)}` : "";
+          resultEl.innerHTML = `<span class="text-emerald-600 font-semibold">✓ 连通成功 (${elapsed}ms)</span> · 回复: "${res.reply.substring(0, 30)}"${routeHint}`;
+          showToast(`连通性测试通过！(${elapsed}ms)`);
+        } else {
+          resultEl.innerHTML = `<span class="text-red-500 font-semibold">✕ 失败</span>: ${res.message || '未知错误'}`;
+        }
+      } catch (e) {
+        const elapsed = Math.round(performance.now() - t0);
+        resultEl.innerHTML = `<span class="text-red-500 font-semibold">✕ 连通异常 (${elapsed}ms)</span>: ${e.message}`;
+        showToast("测试失败: " + e.message, true);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function saveModelConfig() {
+      const role = document.getElementById("setting-target-role").value;
+      const model = getSettingModelId();
+      const base_url = document.getElementById("setting-base-url").value.trim();
+      const api_key = document.getElementById("setting-api-key").value.trim();
+
+      if (!model) {
+        showToast("模型 ID 不能为空", true);
+        return;
+      }
+
+      try {
+        // 1. 保存模型与角色配置
+        await api("/api/settings/save_model_config", {
+          method: "POST",
+          body: JSON.stringify({
+            role: role,
+            model_id: model,
+            base_url: base_url,
+            api_key: api_key,
+            supports_images: true
+          })
+        });
+
+        showToast("✓ 模型参数与硬件密钥已成功保存并立即生效！");
+        await loadAllSettings();
+      } catch (e) {
+        showToast("保存失败: " + e.message, true);
+      }
+    }
+
+    async function loadSoul() {
+      try {
+        const text = document.getElementById("soul-text");
+        if (text && !text.value) {
+          text.value = `角色名: AlterEgo\n人设定位: 极致高效、严谨闭环的个人 AI 智能体\n交互风格: 沉稳专业、杜绝裸 JSON、永远给出人话反馈\n执行准则:\n1. 敏感操作前必触发安全审批\n2. 任务执行动态追踪，实时生成产物归档`;
+        }
+      } catch (e) {}
+    }
+
+    function saveSoulConfig() {
+      showToast("✓ SOUL 核心人设设定已成功注入！");
+    }
+
+    let weixinPollTimer = 0;
+
+    function setWeixinBadge(text, cls) {
+      const b = document.getElementById("weixin-badge");
+      if (!b) return;
+      b.className = cls;
+      b.textContent = text;
+    }
+
+    function stopWeixinPoll() {
+      if (weixinPollTimer) {
+        clearInterval(weixinPollTimer);
+        weixinPollTimer = 0;
+      }
+    }
+
+    function weixinHoursText(h) {
+      const n = Number(h);
+      if (!isFinite(n) || n < 0) return "";
+      if (n >= 1) return (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10) + " 小时";
+      return Math.max(1, Math.round(n * 60)) + " 分钟";
+    }
+
+    async function loadWeixinStatus() {
+      try {
+        const res = await api("/api/weixin/status");
+        if (res.status === "disabled") {
+          setWeixinBadge("○ 通道未启用", "pill-badge bg-gray-100 text-gray-600");
+          return res;
+        }
+        if (res.connected) {
+          if (res.last_error) {
+            setWeixinBadge("⚠ 已登录 · 通道异常：" + res.last_error,
+              "pill-badge bg-amber-50 text-amber-700 border border-amber-200");
+          } else if (res.last_save_error) {
+            setWeixinBadge("⚠ 已登录 · 凭证未落盘：" + res.last_save_error,
+              "pill-badge bg-amber-50 text-amber-700 border border-amber-200");
+          } else if (res.expires_soon) {
+            setWeixinBadge("● 已登录 · 即将到期（约 " + weixinHoursText(res.remaining_hours) + "后）",
+              "pill-badge bg-amber-50 text-amber-700 border border-amber-200");
+          } else {
+            setWeixinBadge("● 已登录在线" + (res.user_id ? " · " + res.user_id : ""),
+              "pill-badge bg-emerald-50 text-emerald-700 border border-emerald-200");
+          }
+          const box = document.getElementById("weixin-qr-container");
+          if (box) box.innerHTML = res.last_error
+            ? '<div class="text-[10px] text-amber-600 text-center px-1">✅ 已绑定<br>通道异常</div>'
+            : '<div class="text-[10px] text-emerald-600 text-center px-1">✅ 已绑定<br>长连接运行中</div>';
+          stopWeixinPoll();
+        } else if (res.has_active_qr) {
+          setWeixinBadge("◔ 等待扫码", "pill-badge bg-blue-50 text-blue-700 border border-blue-200");
+        } else if (res.token_expired) {
+          setWeixinBadge("⚠ 授权已过期", "pill-badge bg-amber-50 text-amber-700 border border-amber-200");
+        } else if (res.credential_missing) {
+          setWeixinBadge("○ 未登录（本机无凭证）", "pill-badge bg-gray-100 text-gray-600");
+        } else {
+          setWeixinBadge("○ 未登录", "pill-badge bg-gray-100 text-gray-600");
+        }
+        return res;
+      } catch (e) {
+        setWeixinBadge("○ 状态获取失败", "pill-badge bg-gray-100 text-gray-600");
+      }
+    }
+
+    async function generateWeixinQr() {
+      try {
+        const res = await api("/api/weixin/login", { method: "POST" });
+        if (res.status === "already_connected") {
+          showToast(res.message || "微信已绑定连接，无需重复扫码");
+          loadWeixinStatus();
+          return;
+        }
+        const box = document.getElementById("weixin-qr-container");
+        if (box) {
+          const tq = apiToken ? `&token=${encodeURIComponent(apiToken)}` : "";
+          box.innerHTML = `<img src="/api/weixin/qr_img?t=${Date.now()}${tq}" class="w-full h-full object-contain rounded" alt="微信扫码绑定">`;
+        }
+        setWeixinBadge("◔ 等待扫码", "pill-badge bg-blue-50 text-blue-700 border border-blue-200");
+        showToast("二维码已生成，请使用手机微信扫码授权");
+        stopWeixinPoll();
+        weixinPollTimer = setInterval(loadWeixinStatus, 4000);
+      } catch (e) {
+        showToast("生成微信登录码失败: " + e.message, true);
+      }
+    }
+
+    // 页面加载即运行
+    window.addEventListener("DOMContentLoaded", loadAllSettings);
+  </script>
+</body>
+</html>

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -153,7 +154,7 @@ def run_memory_distill(
                     lessons_count += 1
                     if experience_store:
                         try:
-                            experience_store.add(f"lesson_{int(time.time())}", claim)
+                            experience_store.add(f"lesson_{uuid.uuid4().hex}", claim)
                         except Exception:
                             pass
 

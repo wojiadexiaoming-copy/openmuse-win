@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import asyncio
 
-# 工具属性表（M4）：parallel_safe=False 的永远串行；is_readonly 的可并行。
-# 新工具在这里登记，默认 parallel_safe=True, is_readonly=False（保守）。
+# 工具默认兜底属性表（仅在无 registry 或未注册工具时兜底使用）
 TOOL_ATTRS = {
     "file_read":    {"parallel_safe": True, "is_readonly": True},
     "web_search":   {"parallel_safe": True, "is_readonly": True},
@@ -19,8 +18,27 @@ TOOL_ATTRS = {
 }
 
 
-def _attrs(name: str) -> dict:
-    return TOOL_ATTRS.get(name, {"parallel_safe": True, "is_readonly": False})
+def _attrs(registry, name: str) -> dict:
+    """以 ToolDefinition 作为属性优先来源 (B5-01)，已知标准工具提供兜底。"""
+    fallback = TOOL_ATTRS.get(name, {"parallel_safe": True, "is_readonly": False})
+    if registry is not None and hasattr(registry, "get"):
+        try:
+            tool = registry.get(name)
+            p_safe = getattr(tool, "parallel_safe", None)
+            if p_safe is None or (p_safe is True and fallback.get("parallel_safe") is False):
+                p_safe = fallback.get("parallel_safe", True)
+
+            ro = getattr(tool, "is_readonly", None)
+            if ro is None or (ro is False and fallback.get("is_readonly") is True):
+                ro = fallback.get("is_readonly", False)
+
+            return {
+                "parallel_safe": bool(p_safe),
+                "is_readonly": bool(ro),
+            }
+        except Exception:
+            pass
+    return fallback
 
 
 async def execute_tool_calls(tool_calls, registry, task_id: str = "?"):
@@ -29,10 +47,10 @@ async def execute_tool_calls(tool_calls, registry, task_id: str = "?"):
     results: dict[str, Message] = {}
 
     readonly = [tc for tc in tool_calls
-                if _attrs(tc.name)["parallel_safe"] and _attrs(tc.name)["is_readonly"]]
+                if _attrs(registry, tc.name)["parallel_safe"] and _attrs(registry, tc.name)["is_readonly"]]
     writers = [tc for tc in tool_calls
-               if _attrs(tc.name)["parallel_safe"] and not _attrs(tc.name)["is_readonly"]]
-    serial = [tc for tc in tool_calls if not _attrs(tc.name)["parallel_safe"]]
+               if _attrs(registry, tc.name)["parallel_safe"] and not _attrs(registry, tc.name)["is_readonly"]]
+    serial = [tc for tc in tool_calls if not _attrs(registry, tc.name)["parallel_safe"]]
 
     # 1. 只读组：线程池并发
     if readonly:

@@ -41,6 +41,7 @@ class Settings:
         "browser_console": "allow",
         "browser_network_log": "allow",
         "browser_inspect": "allow",
+        "browser_react_probe": "allow",
         "browser_resource": "allow",
         "browser_storage": "allow",
         "browser_press": "allow",
@@ -67,9 +68,15 @@ class Settings:
         "file_write": "ask",
         "file_edit": "ask",
         "shell_exec": "ask",
-        "desktop_click": "ask",
-        "desktop_type": "ask",
-        "desktop_hotkey": "ask",
+        "desktop_click": "allow",
+        "desktop_type": "allow",
+        "desktop_hotkey": "allow",
+        "desktop_press": "allow",
+        "desktop_scroll": "allow",
+        "desktop_hover": "allow",
+        "desktop_drag": "allow",
+        "desktop_wait": "allow",
+        "desktop_probe_app": "allow",
         # L3 类默认 deny，由审批逐次放行（spec §36.1：L3 不允许永久批准）
         "file_delete": "deny",
         "publish": "deny",
@@ -96,10 +103,19 @@ class Settings:
 
     def get(self, capability: str, target: str = "") -> str:
         """查某能力在某目标上的策略。target 如 "app:Recordly" / "domain:youtube.com"。"""
-        if target and target in self.overrides:
-            if capability in self.overrides[target]:
+        if target:
+            if target in self.overrides and capability in self.overrides[target]:
                 return self.overrides[target][capability]
-        return self.policy.get(capability, "ask")
+            if not target.startswith(("app:", "domain:")):
+                for prefix in ("app:", "domain:"):
+                    scoped = f"{prefix}{target}"
+                    if scoped in self.overrides and capability in self.overrides[scoped]:
+                        return self.overrides[scoped][capability]
+            elif ":" in target:
+                naked = target.split(":", 1)[1]
+                if naked in self.overrides and capability in self.overrides[naked]:
+                    return self.overrides[naked][capability]
+        return self.policy.get(capability, self.DEFAULTS.get(capability, "ask"))
 
     def set(self, capability: str, value: str, target: str = ""):
         assert value in ("allow", "ask", "deny"), f"非法策略值: {value}"

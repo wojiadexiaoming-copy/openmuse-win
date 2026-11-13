@@ -6,6 +6,7 @@
 
 对应"我是怎么判断步数的"：动作在变、有新信息 → 继续；原地打转 → 停。
 """
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -28,7 +29,10 @@ def _registry(*defs):
 def _orch(llm, reg, **kw):
     kw.setdefault("max_iters", 3)
     kw.setdefault("max_iters_hard", 10)
-    return Orchestrator(llm, reg, ContextBuilder(max_tokens=4000), **kw)
+    orch = Orchestrator(llm, reg, ContextBuilder(max_tokens=4000), **kw)
+    # 这些用例只验证步数水位，不额外消耗一次部分交付的 LLM 调用
+    orch._partial_delivery = lambda *a, **k: ""
+    return orch
 
 
 def _tc(i, name):
@@ -61,7 +65,7 @@ def test_soft_limit_stops_without_progress():
     reg = _registry(("poll", lambda _: "same result"))
     orch = _orch(llm, reg, max_iters=3, max_iters_hard=10)
     reply = orch.handle("poll forever")
-    assert "步骤上限" in reply and "无实质进展" in reply
+    assert "步骤上限" in reply and "停止原因" in reply
     assert llm.chat.call_count == 3, "无进展时 3 步即停"
     assert orch._turn_exhausted
 
@@ -92,7 +96,7 @@ def test_repeat_successful_call_does_not_trigger_stuck():
     orch = _orch(llm, reg, max_iters=3, max_iters_hard=10)
     reply = orch.handle("wait a lot")
     assert "卡死" not in reply
-    assert "无实质进展" in reply  # 软上限收尾，而非卡死早停
+    assert "停止原因" in reply  # 软上限收尾，而非卡死早停
     assert llm.chat.call_count == 3
 
 
@@ -108,6 +112,65 @@ def test_hard_cap_is_absolute():
     reply = orch.handle("long task")
     assert "硬上限" in reply and "5 步" in reply
     assert llm.chat.call_count == 5
+
+
+def test_observation_only_churn_never_extends():
+    """纯观察（截图/快照/切 tab/滚动）再多也不算实质进展。"""
+    llm = MagicMock()
+    llm.model = "offline"
+    names = ["browser_screenshot", "browser_snapshot", "browser_switch_tab",
+             "browser_scroll", "browser_wait_for", "browser_tabs"]
+    calls = [_tc(i, names[i % len(names)]) for i in range(10)]
+    llm.chat.side_effect = [Message(role="assistant", tool_calls=[c]) for c in calls]
+    reg = _registry(*[(n, lambda _: "观察完成") for n in set(names)])
+    orch = _orch(llm, reg, max_iters=3, max_iters_hard=10)
+    reply = orch.handle("look around forever")
+    assert llm.chat.call_count == 3, "观察噪声不得触发续杯"
+    assert "停止原因" in reply
+
+
+def test_blocked_action_results_do_not_count_as_progress():
+    """重定向/租约冲突/通道无进展的结果不计入进展。"""
+    llm = MagicMock()
+    llm.model = "offline"
+    calls = [_tc(i, "browser_click") for i in range(10)]
+    llm.chat.side_effect = [Message(role="assistant", tool_calls=[c]) for c in calls]
+    reg = _registry(("browser_click", lambda _: "[重复重定向熔断·铁律17] 换入口"))
+    orch = _orch(llm, reg, max_iters=3, max_iters_hard=10)
+    reply = orch.handle("retry blocked click")
+    assert llm.chat.call_count == 3
+    assert "停止原因" in reply
+
+
+def test_progress_signature_filters_observation_and_blocked_results():
+    calls = [
+        ToolCall(id="a", name="browser_screenshot", arguments={}),
+        ToolCall(id="b", name="browser_click", arguments={"ref": "ae1"}),
+        ToolCall(id="c", name="browser_fill_input", arguments={"ref": "ae2", "text": "x"}),
+    ]
+    results = [
+        Message(role="tool", tool_call_id="a", name="browser_screenshot", content="ok"),
+        Message(role="tool", tool_call_id="b", name="browser_click",
+                content="[通道=C1(树/ref) 尝试=2/2 无进展]"),
+        Message(role="tool", tool_call_id="c", name="browser_fill_input",
+                content="[已输入] 读回一致"),
+    ]
+    sig = Orchestrator._progress_signature(calls, results)
+    assert len(sig) == 1 and sig[0][0] == "browser_fill_input"
+
+
+def test_wall_clock_timeout_emits_single_message():
+    """run_turn 已追加超时消息时，_handle_turn 不得再追加第二条。"""
+    llm = MagicMock()
+    llm.model = "offline"
+    reg = _registry(("t", lambda _: "ok"))
+    orch = Orchestrator(llm, reg, ContextBuilder(max_tokens=4000),
+                        max_iters=5, max_iters_hard=10, max_turn_wall_clock_sec=0)
+    orch.handle("timeout now")
+    timeout_msgs = [m for m in orch.history
+                    if m.role == "assistant" and m.content.startswith("[已超时]")]
+    assert len(timeout_msgs) == 1, "超时只能发一条消息，不能重复追加"
+    assert orch.last_turn_status == "incomplete"
 
 
 def test_progress_signature_ignores_arg_order():
@@ -175,3 +238,180 @@ def test_safe_args_for_log_redacts_passwords():
     assert args2["text"] == "a@b.com"
     args3 = _safe_args_for_log("browser_navigate", {"url": "https://x.com/" + "y" * 600})
     assert len(args3["url"]) == 500
+
+
+class _FakeSubMgr:
+    """墙钟续期只需要 progress_snapshot / cancel_all 两个接口。"""
+
+    def __init__(self, records):
+        self._records = records
+        self.cancel_all_calls = 0
+
+    def progress_snapshot(self):
+        now = time.time()
+        return [{
+            "task_id": "sub-abcdef1234",
+            "brief": "Agnes 邮箱注册流程",
+            "kind": "browser",
+            "step": 7,
+            "records": [{**rec, "ts": rec.get("ts", now)} for rec in self._records],
+            "deadline": time.time() + 600,
+            "idle_sec": 0.0,
+        }]
+
+    def cancel_all(self):
+        self.cancel_all_calls += 1
+
+
+def _slow_tool(text="观察完成", delay=0.08):
+    def _run(_):
+        time.sleep(delay)
+        return text
+    return _run
+
+
+def test_wall_clock_extends_while_subagent_progresses():
+    """主任务到点，但子任务仍在产出新实质动作 → 自动续期并告知用户。"""
+    llm = MagicMock()
+    llm.model = "offline"
+    llm.chat.side_effect = [
+        Message(role="assistant", tool_calls=[
+            ToolCall(id="s1", name="browser_snapshot", arguments={})]),
+        Message(role="assistant", content="done"),
+    ]
+    reg = _registry(("browser_snapshot", _slow_tool()))
+    events = []
+    sub = _FakeSubMgr([{"tool": "browser_click", "status": "ok",
+                        "result": "[已点击] 进入下一步"}])
+    orch = _orch(llm, reg, turn_extension_sec=5, turn_max_extensions=2,
+                 sub_mgr=sub, on_event=lambda e, d: events.append((e, d)))
+    reply = orch.run_turn(Message(role="user", content="register"),
+                          deadline=time.time() + 0.05, step_budget=10)
+
+    assert reply.content == "done"
+    assert orch._turn_extensions_used == 1
+    notices = [d for e, d in events if e == "turn_notice"]
+    assert notices, "续期必须给用户可见提示，不能默默续"
+    assert "sub-abcdef1234" in notices[0]["text"]
+    assert "停止" in notices[0]["text"]
+
+
+def test_wall_clock_extension_stops_after_max_and_without_fresh_progress():
+    """续期次数封顶；同一批旧进展不能反复续期，最终按超时收尾。"""
+    llm = MagicMock()
+    llm.model = "offline"
+    llm.chat.side_effect = [
+        Message(role="assistant", tool_calls=[
+            ToolCall(id=f"s{i}", name="browser_snapshot", arguments={})])
+        for i in range(8)
+    ]
+    reg = _registry(("browser_snapshot", _slow_tool(delay=0.06)))
+    sub = _FakeSubMgr([{"tool": "browser_click", "status": "ok",
+                        "result": "[已点击] 进入下一步"}])
+    orch = _orch(llm, reg, turn_extension_sec=0.05, turn_max_extensions=1,
+                 sub_mgr=sub)
+    reply = orch.run_turn(Message(role="user", content="register"),
+                          deadline=time.time() + 0.02, step_budget=10)
+
+    assert orch._turn_extensions_used == 1
+    assert "[已超时]" in reply.content
+
+
+def test_wall_clock_timeout_without_progress_does_not_extend():
+    """没有子任务进展、自身也只做观察 → 不续期，直接超时收尾。"""
+    llm = MagicMock()
+    llm.model = "offline"
+    llm.chat.side_effect = [
+        Message(role="assistant", tool_calls=[
+            ToolCall(id="s1", name="browser_snapshot", arguments={})]),
+    ]
+    reg = _registry(("browser_snapshot", _slow_tool(delay=0.06)))
+    orch = _orch(llm, reg, turn_extension_sec=5, turn_max_extensions=3)
+    reply = orch.run_turn(Message(role="user", content="look"),
+                          deadline=time.time() + 0.02, step_budget=10)
+
+    assert orch._turn_extensions_used == 0
+    assert "[已超时]" in reply.content
+
+
+def test_request_stop_cancels_everything():
+    """停止按钮必须真的取消编排与全部子任务，而不是只弹 toast。"""
+    llm = MagicMock()
+    llm.model = "offline"
+    reg = _registry(("t", lambda _: "ok"))
+    sub = _FakeSubMgr([])
+    orch = _orch(llm, reg, sub_mgr=sub)
+    orch.request_stop()
+
+    assert orch.is_cancelled()
+    assert orch.last_turn_status == "cancelled"
+    assert sub.cancel_all_calls == 1
+
+
+def test_stop_mid_turn_returns_string():
+    """取消路径必须回传字符串：历史 Message 回传会炸掉子任务结果验收。"""
+    llm = MagicMock()
+    llm.model = "offline"
+    llm.chat.side_effect = [
+        Message(role="assistant", tool_calls=[
+            ToolCall(id="x", name="stopme", arguments={})]),
+        Message(role="assistant", content="不该走到这里"),
+    ]
+    holder = {}
+
+    def _stop(_):
+        holder["orch"].request_stop()
+        return "stop requested"
+
+    reg = _registry(("stopme", _stop))
+    orch = _orch(llm, reg, sub_mgr=_FakeSubMgr([]))
+    holder["orch"] = orch
+    out = orch.handle("do something")
+
+    assert isinstance(out, str)
+    assert "[任务已取消]" in out
+
+
+def test_subagent_progress_snapshot_reports_running_task():
+    """续期依赖的进度快照必须带 task_id/任务书/步数/工具记录。"""
+    from agent.subagent import SubagentManager, SubagentTask
+
+    class _SlowOrch:
+        def __init__(self, task):
+            self._turn_step = 4
+            self.last_turn_tool_records = [{
+                "tool": "browser_click", "status": "ok", "result": "已点击"}]
+
+        def handle(self, prompt):
+            time.sleep(0.5)
+            return "done"
+
+    mgr = SubagentManager(make_orchestrator=_SlowOrch, enforce_min_memory=False)
+    try:
+        tid = mgr.spawn(SubagentTask(brief="测试任务", use_process=False))
+        deadline = time.time() + 3
+        snap = []
+        while time.time() < deadline:
+            snap = mgr.progress_snapshot()
+            if snap and snap[0].get("step") == 4:
+                break
+            time.sleep(0.02)
+        assert snap and snap[0]["task_id"] == tid
+        assert snap[0]["brief"] == "测试任务"
+        assert snap[0]["step"] == 4
+        assert snap[0]["records"][0]["tool"] == "browser_click"
+    finally:
+        mgr.shutdown()
+
+
+def test_build_subagent_result_accepts_message_summary():
+    """子 Agent 被取消时会把 Message 当 summary 传回来，不能 TypeError。"""
+    from agent.subagent import build_subagent_result
+    fake_orch = SimpleNamespace(last_turn_tool_records=[],
+                                _turn_exhausted=False,
+                                last_turn_status="cancelled")
+    result = build_subagent_result(
+        "sub-abc", fake_orch,
+        Message(role="assistant", content="[任务已取消] 编排循环已终止。"))
+    assert result.status == "partial"
+    assert "[任务已取消]" in result.summary

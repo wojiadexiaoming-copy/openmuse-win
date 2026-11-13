@@ -10,9 +10,10 @@ from tools.browser.worker import BrowserWorker
 
 
 class FakeInputLocator:
-    def __init__(self, tag="textarea", exists=True):
+    def __init__(self, tag="textarea", exists=True, page=None):
         self._tag = tag
         self._exists = exists
+        self._page = page
 
     def count(self):
         return 1 if self._exists else 0
@@ -25,17 +26,46 @@ class FakeInputLocator:
         pass
 
     def click(self, timeout=None):
-        pass
+        if self._page:
+            self._page._focused = self._page.focusable
 
-    def evaluate(self, js):
-        pass
+    def evaluate(self, js, *args):
+        if "ae-fill-mark" in js:
+            self._page._marked = True
+            self._page._focused = self._page.focusable
+            tag = self._page._target_tag()
+            return {
+                "ok": True,
+                "tag": tag,
+                "is_input": self._page.target_type == "native",
+                "is_contenteditable": self._page.target_type != "native",
+                "focused": self._page.focusable,
+                "active_tag": tag,
+            }
+        return None
+
+
+class FakeContainerLocator(FakeInputLocator):
+    """命中容器但容器内部没有可编辑节点（抖音评论占位栏场景）。"""
+
+    def evaluate(self, js, *args):
+        if "ae-fill-mark" in js:
+            return {"ok": False, "reason": "not_editable",
+                    "tag": "div.comment-input-inner-container"}
+        return None
 
 
 class FakePageForInput:
-    def __init__(self, target_type="native", readback_ok=True, in_modal=False):
+    def __init__(self, target_type="native", readback_ok=True, in_modal=False,
+                 focusable=True, readback_text=None, container_only=False,
+                 modal_contains_target=True):
         self.target_type = target_type
         self.readback_ok = readback_ok
         self.in_modal = in_modal
+        self.focusable = focusable
+        self.readback_text = readback_text
+        self.container_only = container_only
+        self.modal_contains_target = modal_contains_target
         self.url = "https://example.com/item/123"
         self.main_frame = self
         self.frames = [self]
@@ -60,11 +90,70 @@ class FakePageForInput:
         self.keyboard = Keyboard()
         self.mouse = Mouse()
         self._value_store = ""
+        self._marked = False
+        self._focused = False
+
+    def _target_tag(self):
+        if self.target_type == "contenteditable":
+            return "div.notion-editor"
+        if self.target_type == "native":
+            return "textarea#comment-input"
+        return "div.container"
 
     def title(self):
         return "Example Page"
 
     def evaluate(self, js, *args):
+        if "ae-fill-mark" in js:
+            self._marked = True
+            self._focused = self.focusable
+            tag = self._target_tag()
+            return {
+                "ok": True,
+                "tag": tag,
+                "is_input": self.target_type == "native",
+                "is_contenteditable": self.target_type == "contenteditable",
+                "focused": self.focusable,
+                "active_tag": tag,
+            }
+        if "ae-fill-state" in js:
+            if not self._marked:
+                return {"found": False}
+            tag = self._target_tag()
+            if self.readback_ok:
+                val = self._value_store
+            elif self.readback_text is not None:
+                val = self.readback_text
+            else:
+                val = ""
+            return {
+                "found": True,
+                "focused": self._focused,
+                "tag": tag,
+                "active_tag": tag,
+                "is_input": self.target_type == "native",
+                "is_contenteditable": self.target_type == "contenteditable",
+                "current_value": val,
+            }
+        if "ae-fill-reset" in js:
+            self._marked = False
+            return True
+        if "ae-fill-clear" in js:
+            if self.readback_ok:
+                self._value_store = ""
+            return True
+        if "ae-fill-write-input" in js or "ae-fill-write-ce" in js:
+            if self.readback_ok and args:
+                self._value_store = args[0]
+            return True
+        if "ae-fill-focus" in js:
+            self._focused = self.focusable
+            return True
+        if "ae-fill-blur" in js:
+            return True
+        if "ae-fill-in-modal" in js:
+            return bool(self.in_modal and self.modal_contains_target)
+
         if "standardSelectors" in js:
             if self.in_modal:
                 return {
@@ -111,12 +200,15 @@ class FakePageForInput:
         return None
 
     def locator(self, selector):
-        return FakeInputLocator(exists=True)
+        if self.container_only:
+            return FakeContainerLocator(exists=True, page=self)
+        return FakeInputLocator(exists=True, page=self)
 
 
-def make_worker(target_type="native", readback_ok=True, in_modal=False):
+def make_worker(target_type="native", readback_ok=True, in_modal=False, **kwargs):
     w = BrowserWorker.__new__(BrowserWorker)
-    w._raw_page = FakePageForInput(target_type=target_type, readback_ok=readback_ok, in_modal=in_modal)
+    w._raw_page = FakePageForInput(target_type=target_type, readback_ok=readback_ok,
+                                   in_modal=in_modal, **kwargs)
     w.headless = True
     w.split_screen = False
     w._do_guard = lambda: None
@@ -164,5 +256,51 @@ def test_fill_input_with_modal_tag_and_enter():
     res = w._do_fill_input({"selector": "textarea", "text": "浮层内带回车输入", "press_enter": True})
     assert "[输入成功]" in res
     assert "[浮层内]" in res
-    assert "(已按回车提交)" in res
+    # v1.5.22：Enter 只证明按键已发出，是否提交由回读判定，不得直接写"提交"
+    assert "(已按回车)" in res
+    assert "(已按回车提交)" not in res
     assert "Enter" in w._raw_page.pressed_keys
+
+
+def test_fill_input_coords_ignored_when_selector_present():
+    """显式目标优先：同时给 selector 与 coords 时不得按坐标点击（目标漂移根因）。"""
+    w = make_worker(target_type="native", readback_ok=True)
+    res = w._do_fill_input({"selector": "textarea", "coords": [500, 950], "text": "显式目标优先"})
+    assert "[输入成功]" in res
+    assert "已忽略坐标(500, 950)" in res
+    assert w._raw_page.mouse_clicks == []
+
+
+def test_fill_input_never_falls_back_to_other_inputs():
+    """目标容器不可编辑时诚实失败，绝不改填页面上第一个输入框（抖音搜索框事故）。"""
+    w = make_worker(target_type="native", readback_ok=True, container_only=True)
+    res = w._do_fill_input({"selector": ".comment-input-inner-container", "text": "评论内容"})
+    assert "[输入失败]" in res
+    assert "禁止改填" in res
+    assert w._raw_page._value_store == ""
+
+
+def test_fill_input_aborts_when_target_cannot_focus():
+    w = make_worker(target_type="native", readback_ok=True, focusable=False)
+    res = w._do_fill_input({"selector": "textarea", "text": "不应写入"})
+    assert "[输入失败]" in res
+    assert "未能获得焦点" in res
+    assert w._raw_page._value_store == ""
+
+
+def test_fill_input_readback_no_length_exemption():
+    """回读里已有别的长文本时不得判成功（旧判据 len>10 即放行）。"""
+    w = make_worker(target_type="native", readback_ok=False,
+                    readback_text="抖音搜索框里一段很长很长的历史搜索词")
+    res = w._do_fill_input({"selector": "textarea", "text": "这是要写的评论"})
+    assert "[输入未落地]" in res
+    assert "[输入成功]" not in res
+
+
+def test_fill_input_modal_tag_requires_real_containment():
+    """检测到浮层但目标节点不在浮层容器内时，不得标注 [浮层内]。"""
+    w = make_worker(target_type="native", readback_ok=True, in_modal=True,
+                    modal_contains_target=False)
+    res = w._do_fill_input({"selector": "textarea", "text": "浮层外的目标"})
+    assert "[输入成功]" in res
+    assert "[浮层内]" not in res

@@ -1,4 +1,4 @@
-"""点击反馈保真度（s-cdf93b36b0 第二轮实测教训）：
+﻿"""点击反馈保真度（s-cdf93b36b0 第二轮实测教训）：
 
 [124] 点发送验证码按钮返回"[已点击]"，但码实际没发出去，模型信了"成功"
 去邮箱空轮询。点击成功只证明 Playwright 点到了元素，不等于业务效果达成。
@@ -126,7 +126,7 @@ def test_click_with_page_change_returns_plain_success():
     """点击后页面有变化 → 普通[已点击]，不打扰模型。"""
     w = make_worker(FakePageWithEvaluate())
     out = w._do_click({"selector": "#send"})
-    assert out.startswith("[已点击]")
+    assert "[已点击]" in out
     assert "无任何变化" not in out
 
 
@@ -136,7 +136,7 @@ def test_click_without_page_change_adds_warning_hint():
     page.change_on_click = False
     w = make_worker(page)
     out = w._do_click({"selector": "#send"})
-    assert out.startswith("[已点击]")
+    assert "[已点击]" in out
     assert "无任何变化" in out
     assert "browser_screenshot" in out
 
@@ -149,7 +149,7 @@ def test_click_fingerprint_failure_degrades_gracefully():
 
     w = make_worker(NoEvaluatePage())
     out = w._do_click({"selector": "#send"})
-    assert out == "[已点击] #send"
+    assert out.endswith("[已点击] #send")
 
 
 def test_click_timeout_adds_icon_button_hint():
@@ -212,7 +212,7 @@ def test_click_ignores_successful_api_response():
     ]
     w = make_worker(page)
     out = w._do_click({"selector": "#send-code"})
-    assert out.startswith("[已点击]")
+    assert "[已点击]" in out
     assert "[警告]" not in out
 
 

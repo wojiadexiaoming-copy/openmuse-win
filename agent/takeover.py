@@ -1,8 +1,11 @@
-"""用户接管管理器（spec §15 / §31.5）。
+"""用户接管管理器（spec §15 / §31.5 / §39.18）。
 
 当浏览器/桌面 Agent 遇到需要人工处理的环节（验证码、扫码、登录墙、复杂人工操作），
-通过 TakeoverManager 进入 paused_takeover 状态，弹出置顶小浮窗，等待用户操作完成后
-再从暂停点自动恢复执行。
+通过 TakeoverManager 进入 paused_takeover 状态，等待用户操作完成后再从暂停点恢复。
+
+呈现方式：浏览器窗口置前 + 页内橙色接管横幅（完成/停止）+ 一条可操作系统通知。
+默认不弹桌面浮窗；auto_show_window=True 仅用于主窗口已隐藏、需要独立控制面的场景，
+由调用方显式开启。
 """
 from __future__ import annotations
 
@@ -22,6 +25,8 @@ class TakeoverRequest:
     target: str = "Chrome"
     page_url: str = ""
     screenshot_path: str = ""
+    # 发起方：agent=工具/子 Agent 主动求助；page=用户在网页横幅内点【申请人工接管】；ui=桌面 UI
+    source: str = "agent"
     requested_at: str = field(
         default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
@@ -51,13 +56,15 @@ class TakeoverManager:
     def __init__(
         self,
         event_bus=None,
-        auto_show_window: bool = True,
+        auto_show_window: bool = False,
         port: int = 5000,
+        token: str = "",
         on_event: Callable | None = None,
     ):
         self.event_bus = event_bus
         self.auto_show_window = auto_show_window
         self.port = port
+        self.token = token
         self.on_event = on_event
         self._requests: dict[str, TakeoverRequest] = {}
         self._events: dict[str, threading.Event] = {}
@@ -72,8 +79,9 @@ class TakeoverManager:
         page_url: str = "",
         screenshot_path: str = "",
         timeout_sec: float = 7200.0,
+        source: str = "agent",
     ) -> TakeoverRequest:
-        """发起接管请求并触发浮窗。"""
+        """发起接管请求并通知用户（默认不弹桌面浮窗）。"""
         with self._lock:
             now = datetime.datetime.now(datetime.timezone.utc)
             exp = (now + datetime.timedelta(seconds=timeout_sec)).isoformat()
@@ -83,23 +91,14 @@ class TakeoverManager:
                 target=target,
                 page_url=page_url,
                 screenshot_path=screenshot_path,
+                source=source,
                 expires_at=exp,
                 status="active",
             )
             self._requests[task_id] = req
             self._events[task_id] = threading.Event()
 
-        log.info(f"[takeover] 发起接管 task_id={task_id} target={target} reason={reason}")
-
-        try:
-            from agent.notify import notify
-            notify(
-                title="AlterEgo 需要人工介入协同",
-                message=f"【{target}】{reason}\n请在浏览器完成操作后交还控制权。",
-                urgent=True,
-            )
-        except Exception as e:
-            log.debug(f"[takeover] 发送系统通知失败: {e}")
+        log.info(f"[takeover] 发起接管 task_id={task_id} source={source} target={target} reason={reason}")
 
         payload = {
             "task_id": task_id,
@@ -107,13 +106,26 @@ class TakeoverManager:
             "reason": reason,
             "page_url": page_url,
             "screenshot_path": screenshot_path,
+            "source": source,
             "requested_at": req.requested_at,
             "expires_at": req.expires_at,
         }
         if self.on_event:
             self.on_event("takeover_request", payload)
-        elif self.event_bus:
-            self.event_bus.broadcast("takeover_request", payload)
+        else:
+            if self.event_bus:
+                self.event_bus.broadcast("takeover_request", payload)
+            # UI 模式由服务端发带「前往接管」按钮的 Toast；这里只给无 UI 通道的 CLI
+            # 兜底，否则同一次接管会连弹两条系统通知（§39.18）。
+            try:
+                from agent.notify import notify
+                notify(
+                    title="AlterEgo 需要人工介入协同",
+                    message=f"【{target}】{reason}\n请在浏览器完成操作后交还控制权。",
+                    urgent=True,
+                )
+            except Exception as e:
+                log.debug(f"[takeover] 发送系统通知失败: {e}")
 
         if self.auto_show_window:
             try:
@@ -123,6 +135,7 @@ class TakeoverManager:
                     target=target,
                     reason=reason,
                     port=self.port,
+                    token=self.token,
                 )
             except Exception as e:
                 log.warning(f"[takeover] 启动接管浮窗失败（继续保持等待）: {e}")
@@ -167,11 +180,24 @@ class TakeoverManager:
                 "target": req.target,
                 "reason": req.reason,
                 "page_url": req.page_url,
+                "source": req.source,
                 "status": req.status,
                 "summary": res.summary if res else "",
                 "requested_at": req.requested_at,
                 "expires_at": req.expires_at,
             }
+
+    def poll(self, task_id: str) -> TakeoverResult | None:
+        """非阻塞查询：已解决返回结果，未解决返回 None。
+
+        §39.24：浏览器调用线程在等待用户接管时必须保持 Playwright 事件循环在转
+        （泵式等待），用 poll 代替 Event.wait，网页横幅的按钮回调才能被投递进来。
+        """
+        with self._lock:
+            ev = self._events.get(task_id)
+            if ev is None or not ev.is_set():
+                return None
+            return self._results.get(task_id)
 
     def wait_for_takeover(
         self,
@@ -193,6 +219,14 @@ class TakeoverManager:
                 task_id,
                 TakeoverResult(task_id=task_id, outcome="completed", summary="完成"),
             )
+
+    def cancel_all(self, summary: str = "任务已取消") -> None:
+        """取消所有等待中的接管请求并唤醒等待线程。"""
+        with self._lock:
+            pending = [tid for tid, ev in self._events.items() if not ev.is_set()]
+        for tid in pending:
+            self.resolve(tid, "cancelled", summary)
+
 
 
 # 全局单例管理器

@@ -33,6 +33,13 @@ _EXCLUDED_DIRS = {
     "browser_cache", "browser-cache", "ms-playwright", ".playwright",
 }
 _COUNT_PATTERN = r"(\d+|[零〇一二两三四五六七八九十百千]+)\s*(张|个|份|段|秒|分钟)"
+# 时长只有落在音视频交付语境里才是产物要求（"10分钟内完成注册"不是要 10 分钟视频）
+_DURATION_CONTEXT = re.compile(
+    r"(?:视频|录像|录屏|录制|拍摄|剪辑|影片|短片|音频|录音|音乐|"
+    r"vlog|mp4|mov|webm|mkv|avi|mp3|wav|m4a)",
+    re.I,
+)
+_DURATION_CONTEXT_WINDOW = 40
 _VISUAL_CREATE = r"(?:生图|生成(?!的)|制作(?!的)|绘制(?!的))"
 _NAMED_VISUAL_APP = r"(?:豆包|即梦|通义万相|文心一格|ChatGPT|Midjourney|DALL[·-]?E|Canva|Firefly)"
 _INTERNAL_VISUAL_APP = r"(?:桌面应用|桌面软件|浏览器(?:应用)?|网页应用|网站|网页|客户端|应用|软件|平台|app)"
@@ -200,6 +207,8 @@ def _goal_artifact_kind(task_goal: str) -> str:
         return "图片"
     if re.search(actions + r".{0,60}(?:视频|录像|影片)", task_goal):
         return "视频"
+    if re.search(actions + r".{0,60}(?:音频|录音|音乐)", task_goal):
+        return "音频"
     if re.search(actions + r".{0,60}(?:文件|文档)", task_goal):
         return "文件"
     return ""
@@ -224,6 +233,11 @@ def extract_criteria(task_goal: str, plan=None) -> list[str]:
             # （qq_run1 教训："3分钟后看收件箱" 被误判为要生成3分钟视频）
             after = task_goal[match.end():match.end()+2]
             if after.startswith(("后", "内", "之")):
+                continue
+            # 只有音视频交付语境才检查时长；"10分钟内完成注册" 是节奏要求
+            start = max(0, match.start() - _DURATION_CONTEXT_WINDOW)
+            end = min(len(task_goal), match.end() + _DURATION_CONTEXT_WINDOW)
+            if not _DURATION_CONTEXT.search(task_goal[start:end]):
                 continue
             criteria.append(f"时长检查：{amount}{unit}")
             continue
@@ -309,7 +323,15 @@ def outcome_requirement(task_goal: str) -> dict:
             elif kind == "图片":
                 mixed_outputs = True
     if not kind and any(criterion.startswith("时长检查：") for criterion in criteria):
-        kind = "视频"
+        # 时长条件单独出现不构成产物要求（"10分钟内完成注册"）；
+        # 只有目标本身明确是音视频创作时才反推产物类型。
+        media = _DURATION_CONTEXT.search(task_goal)
+        creation = re.search(
+            r"(?:生成|制作|做|录制|拍摄|剪辑|合成|导出|保存|下载)", task_goal)
+        if media and creation:
+            kind = ("视频" if re.search(
+                r"(?:视频|录像|录屏|影片|短片|vlog|mp4|mov|webm|mkv|avi)",
+                task_goal, re.I) else "音频")
     if not kind:
         return ordinary
     external = _external_generation(task_goal, kind)

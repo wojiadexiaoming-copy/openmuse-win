@@ -248,6 +248,37 @@ def _native_window_info(hwnd):
             "foreground": int(user32.GetForegroundWindow() or 0) == hwnd}
 
 
+def _owned_foreground_modal(owner_hwnd):
+    """Return an owned foreground modal only when its bound owner is disabled."""
+    if not owner_hwnd or os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetWindow.restype = wintypes.HWND
+        user32.IsWindowEnabled.argtypes = [wintypes.HWND]
+        user32.IsWindowEnabled.restype = wintypes.BOOL
+        foreground = int(user32.GetForegroundWindow() or 0)
+        if not foreground or foreground == owner_hwnd or user32.IsWindowEnabled(owner_hwnd):
+            return None
+        pid = _get_process_id_from_hwnd(foreground)
+        if not pid or pid != _get_process_id_from_hwnd(owner_hwnd):
+            return None
+        owner = int(user32.GetWindow(foreground, 4) or 0)
+        for _ in range(8):
+            if not owner:
+                return None
+            if owner == owner_hwnd:
+                return foreground
+            owner = int(user32.GetWindow(owner, 4) or 0)
+    except Exception:
+        return None
+    return None
+
+
 def _show_target_window(hwnd, command):
     current_state().require_not_halted()
     import ctypes
@@ -256,6 +287,71 @@ def _show_target_window(hwnd, command):
     user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.ShowWindow.restype = wintypes.BOOL
     user32.ShowWindow(hwnd, command)
+
+
+def _activate_window(hwnd):
+    """把目标窗口置前；PyGetWindow 抛 PyGetWindowException 时退回 Win32 原生路径。
+
+    前台锁（Windows foreground lock）会让 activate() 抛异常，但窗口本身可能已经
+    可用或已最大化——异常不应被当成"窗口不可用"直接放弃（v1.5.22 P1-2）。
+    """
+    if not hwnd:
+        return False
+    try:
+        import pygetwindow as gw
+        matches = [window for window in gw.getAllWindows()
+                   if int(getattr(window, "_hWnd", 0)) == hwnd]
+        if len(matches) == 1:
+            try:
+                matches[0].activate()
+            except Exception as exc:
+                if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
+                    raise
+            try:
+                if _native_window_info(hwnd).get("foreground"):
+                    return True
+            except Exception as exc:
+                if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
+                    raise
+    except Exception as exc:
+        if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
+            raise
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)
+        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+        current_thread = kernel32.GetCurrentThreadId()
+        attached = False
+        if target_thread and current_thread and target_thread != current_thread:
+            attached = bool(user32.AttachThreadInput(current_thread, target_thread, True))
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(current_thread, target_thread, False)
+        try:
+            return _native_window_info(hwnd).get("foreground") is True
+        except Exception as exc:
+            if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
+                raise
+            return False
+    except Exception as exc:
+        if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
+            raise
+        return False
 
 
 def _maximize_target_window(window_title="", hwnd=None):
@@ -279,7 +375,7 @@ def _maximize_target_window(window_title="", hwnd=None):
         before = _native_window_info(target_hwnd)
         native_checked = True
         if not before.get("foreground"):
-            target.activate()
+            _activate_window(target_hwnd)
         if not before.get("maximizable"):
             if before.get("minimized"):
                 changed = True
@@ -290,20 +386,27 @@ def _maximize_target_window(window_title="", hwnd=None):
             if not maximized_geometry_verified(before):
                 changed = True
                 _show_target_window(target_hwnd, 3)
+        # 几何稳定与前台解耦：窗口置前可能被 Windows 前台锁拒绝，但只要几何已稳定
+        # 就应视为可用；前台在操作/截图前再单独置前并校验（v1.5.22 P1-2）。
         previous_rect, stable = None, 0
-        for _ in range(12):
+        foreground = before.get("foreground") is True
+        for attempt in range(40):
             after = _native_window_info(target_hwnd)
             rect = after.get("rect")
-            ready = (valid_window_rect(rect) and not after.get("minimized") and after.get("foreground") is True
-                     and (expected_status == "fixed_size" or maximized_geometry_verified(after)))
-            stable = stable + 1 if ready and rect == previous_rect else 0
+            foreground = after.get("foreground") is True
+            geometry_ready = (valid_window_rect(rect) and not after.get("minimized")
+                              and (expected_status == "fixed_size" or maximized_geometry_verified(after)))
+            stable = stable + 1 if geometry_ready and rect == previous_rect else 0
             if stable >= 1:
                 return {"status": expected_status, "geometry_verified": True, "hwnd": target_hwnd,
-                        "rect": dict(rect), "changed": changed or rect != before.get("rect")}
+                        "rect": dict(rect), "foreground": foreground,
+                        "changed": changed or rect != before.get("rect")}
             previous_rect = rect
+            if not foreground and attempt in {0, 8, 20}:
+                _activate_window(target_hwnd)
             time.sleep(.05)
         return {"status": "maximize_unverified", "geometry_verified": False,
-                "hwnd": target_hwnd, "changed": changed}
+                "hwnd": target_hwnd, "foreground": foreground, "changed": changed}
     except Exception as exc:
         if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
             raise
@@ -353,7 +456,8 @@ def _controls_for_model(controls, limit=64, *, screen_size=None, image_size=None
 
 def _layout_note(layout):
     if layout.get("status") == "maximized" and layout.get("geometry_verified"):
-        return "；目标窗口已最大化并验证"
+        return "；目标窗口已最大化并验证" + ("（未确认前台，操作前会再次置前）"
+                                         if layout.get("foreground") is False else "")
     if layout.get("status") == "fixed_size":
         return "；固定尺寸窗口已保留"
     return "；最大化尚未验证，请观察目标窗口"
@@ -378,10 +482,13 @@ def _restore_window(hwnd):
         if len(matches) != 1:
             return False
         if getattr(matches[0], "isMinimized", False):
-            matches[0].restore()
-        matches[0].activate()
+            try:
+                matches[0].restore()
+            except Exception:
+                pass
+        ok = _activate_window(hwnd)
         time.sleep(.15)
-        return True
+        return ok
     except Exception as exc:
         if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
             raise
@@ -428,6 +535,8 @@ def _capture(args, *, preserve_input=False, prepare_window=True):
     previous = state.snapshot.get("window") or {}
     requested_title = args.get("window_title", "")
     bound_hwnd = previous.get("hwnd") if not requested_title else None
+    if bound_hwnd:
+        bound_hwnd = _owned_foreground_modal(bound_hwnd) or bound_hwnd
     layout = (_maximize_target_window(window_title=requested_title, hwnd=bound_hwnd)
               if prepare_window else {"status": "preserved_after_action", "geometry_verified": False, "changed": False})
     if layout.get("changed"):
@@ -437,7 +546,6 @@ def _capture(args, *, preserve_input=False, prepare_window=True):
         raise EvidenceError("窗口最大化后的几何状态未稳定，请重新观察目标窗口。")
     probe = _probe(window_title=requested_title, hwnd=bound_hwnd)
     window = probe.get("window") or {}
-    bound_hwnd = previous.get("hwnd") if not requested_title else None
     if (requested_title or bound_hwnd) and (
             not probe.get("ok") or not window.get("hwnd")
             or (bound_hwnd and window.get("hwnd") != bound_hwnd)):
@@ -448,6 +556,20 @@ def _capture(args, *, preserve_input=False, prepare_window=True):
             or not window_rect_matches(window.get("rect"), layout.get("rect"), tolerance=16)):
         state.invalidate()
         raise EvidenceError("窗口最大化后的 UIA 几何不匹配，请重新观察。")
+    if (requested_title or bound_hwnd) and not window.get("foreground"):
+        # 截图前再置前一次；Windows 前台锁可能拒绝，但不能把"前台未确认"
+        # 伪装成"几何未稳定"。仍失败时如实标注像素可能被遮挡。
+        _activate_window(int(window.get("hwnd") or 0))
+        time.sleep(.1)
+        probe = _probe(window_title=requested_title, hwnd=bound_hwnd)
+        window = probe.get("window") or {}
+        layout = dict(layout)
+        layout["foreground"] = window.get("foreground") is True
+        if layout.get("geometry_verified") and (
+                window.get("hwnd") != layout.get("hwnd")
+                or not window_rect_matches(window.get("rect"), layout.get("rect"), tolerance=16)):
+            state.invalidate()
+            raise EvidenceError("置前后目标窗口几何发生变化，请重新观察。")
     shot = pyautogui.screenshot()
     if layout.get("geometry_verified"):
         current = _native_window_info(layout["hwnd"])
@@ -490,6 +612,9 @@ def _capture(args, *, preserve_input=False, prepare_window=True):
                  "UIA rect 是 screen 空间，image_rect 已按实际宽高分别换算为 image 空间，不能混用。\n"
                  + ("未指定目标窗口，本次未请求最大化；请指定 window_title 重新观察目标后再操作。\n"
                     if layout.get("status") == "untargeted" else "")
+                 + ("目标窗口未能置前（Windows 前台锁）；截图像素可能被其他窗口遮挡，"
+                    "但 UIA 坐标仍有效，动作前会再次置前并校验。\n"
+                    if layout.get("foreground") is False else "")
                  + json.dumps(details, ensure_ascii=False, separators=(",", ":"))),
         images=[ImagePart(data=out_file.read_bytes(), mime="image/jpeg", mime_type="image/jpeg")],
         metadata={"desktop_observation": details},
@@ -719,6 +844,9 @@ def desktop_open_app(args: dict) -> Message | str:
     target = (args.get("app_name") or args.get("target") or args.get("name") or "").strip()
     if not target:
         return "[打开失败] 未指定 app_name 或 target"
+    # 防命令注入：严格禁止命令连接符与元字符（B3-03）
+    if re.search(r"[&|;<>\r\n`]", target):
+        return f"[打开失败] 非法应用名称或路径，禁止包含命令连接符: {target}"
     try:
         current_state().require_not_halted()
         current_state().invalidate()
@@ -733,8 +861,9 @@ def desktop_open_app(args: dict) -> Message | str:
         if matched:
             w = matched[0]
             try:
-                w.activate()
-                layout = _maximize_target_window(hwnd=int(getattr(w, "_hWnd", 0)))
+                match_hwnd = int(getattr(w, "_hWnd", 0))
+                _activate_window(match_hwnd)
+                layout = _maximize_target_window(hwnd=match_hwnd)
                 return f'[已激活已打开窗口] "{w.title}"' + _layout_note(layout)
             except Exception as exc:
                 if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
@@ -775,11 +904,15 @@ def desktop_open_app(args: dict) -> Message | str:
                     raise
                 pass
 
-        # 4. 否则通过 Windows cmd 的 start 启动（加空标题防空格截断）
-        cmd = f'start "" /max "{target}"'
-        subprocess.Popen(cmd, shell=True)
-        time.sleep(1.0)
-        return f"[已通过系统命令启动] {target}；已请求最大化，截图前将验证"
+        # 4. 否则通过 Windows API 或安全参数化启动（彻底禁用 shell=True 防注入）
+        try:
+            os.startfile(target)
+            time.sleep(1.0)
+            return f"[已通过系统命令启动] {target}；已请求最大化，截图前将验证"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", "/max", target], shell=False)
+            time.sleep(1.0)
+            return f"[已通过系统命令启动] {target}；已请求最大化，截图前将验证"
     except Exception as e:
         stopped = _desktop_stop_result("desktop_open_app", e)
         if stopped is not None:
@@ -802,7 +935,7 @@ def desktop_click(args: dict) -> Message | str:
                        if (window.title or "").casefold() == args["window_title"].casefold()]
             if len(matches) != 1:
                 raise EvidenceError("窗口不存在或名称歧义，不能声称已经激活。")
-            matches[0].activate()
+            _activate_window(int(getattr(matches[0], "_hWnd", 0)))
             state.invalidate()
             result = desktop_screenshot({"window_title": args["window_title"]})
             if isinstance(result, Message) and result.metadata["desktop_observation"]["window"].get("foreground"):
@@ -814,6 +947,12 @@ def desktop_click(args: dict) -> Message | str:
         env_guard = _check_safe_desktop_environment("desktop_click")
         if env_guard is not None:
             return env_guard
+
+        if _owned_foreground_modal((state.snapshot.get("window") or {}).get("hwnd")):
+            result = _capture({}, prepare_window=False)
+            result.content = ("[桌面目标已切换] 检测到原窗口的前台模态对话框，已重新截图并绑定真实窗口；"
+                              "本次未发送点击，请使用新的 snapshot_id 和控件句柄继续。\n" + result.content)
+            return result
 
         # 3. Resolve target control and coordinates
         target_ctrl = state.resolve_control(ref) if ref else None
@@ -887,11 +1026,29 @@ def desktop_click(args: dict) -> Message | str:
 
         focus_result = _read_focus(hwnd=state.snapshot["window"]["hwnd"])
         focus_verified = state.set_focus(focus_result)
+        focus_fallback_error = ""
+        focus_fallback_used = False
+        if (not focus_verified and target_ctrl and target_ctrl.get("editable")
+                and target_ctrl.get("control_ref") and state.snapshot["window"].get("hwnd")):
+            from .desktop_accessibility import focus_control
+            focus_fallback_used = True
+            fallback_result = focus_control(
+                state.snapshot["window"]["hwnd"], target_ctrl["control_ref"])
+            if fallback_result.get("ok"):
+                focus_result = fallback_result
+                focus_verified = state.set_focus(focus_result)
+            else:
+                focus_fallback_error = fallback_result.get("error_type", "")
         post_label = label + f" 物理屏幕坐标: ({x}, {y})；点击本身不代表目标已完成。"
+        if focus_fallback_used and focus_verified:
+            post_label += "；已通过 UIA 聚焦并复核目标编辑框"
         return _post_action(post_label,
                             {"action": "click", "focus_verified": focus_verified,
                              "pattern_used": pattern_used,
-                             "focus": focus_result.get("focus") or {}}, preserve_input=focus_verified)
+                             "focus": focus_result.get("focus") or {},
+                             "error_type": focus_result.get("error_type", ""),
+                             "focus_fallback_used": focus_fallback_used,
+                             "focus_fallback_error": focus_fallback_error}, preserve_input=focus_verified)
     except Exception as exc:
         stopped = _desktop_stop_result("desktop_click", exc)
         if stopped is not None:
@@ -948,6 +1105,9 @@ def desktop_type(args: dict) -> Message | str:
         _live_window()
         target_hwnd = state.snapshot["window"]["hwnd"]
         before = _read_focus(hwnd=target_hwnd)
+        if not before.get("ok"):
+            reason = before.get("error_type") or "uia_focus_unavailable"
+            raise EvidenceError(f"目标窗口焦点读取失败（{reason}）；请重新截图并点击目标编辑框。")
         focus_before = state.require_focus(before)
         text = str(args.get("text", ""))
         if not text:
@@ -1222,6 +1382,7 @@ DESKTOP_TOOLS = [
         description="截取当前 Windows 操作系统桌面屏幕并保存至本地，返回截图路径。",
         parameters={"type": "object", "properties": {"out_dir": {"type": "string", "default": "."}}, "required": []},
         func=desktop_screenshot,
+        is_readonly=True,
     ),
     ToolDefinition(
         name="desktop_show_desktop",
@@ -1234,18 +1395,14 @@ DESKTOP_TOOLS = [
         description="获取当前 Windows 桌面上真实存在的所有项目列表（包含全部文件夹、文件、应用快捷方式及路径）。在操作桌面目标或判断桌面是否存在某项目前，必须调用本工具自主感知桌面真实内容。",
         parameters={"type": "object", "properties": {}, "required": []},
         func=desktop_list_items,
-    ),
-    ToolDefinition(
-        name="desktop_list_shortcuts",
-        description="扫描并列出当前 Windows 桌面上所有已存在的文件夹、常规文件与快捷方式图标（兼容别名，功能同 desktop_list_items）。",
-        parameters={"type": "object", "properties": {}, "required": []},
-        func=desktop_list_shortcuts,
+        is_readonly=True,
     ),
     ToolDefinition(
         name="desktop_list_windows",
         description="列出当前 Windows 桌面上所有已打开的可见应用程序窗口名称及位置。",
         parameters={"type": "object", "properties": {}, "required": []},
         func=desktop_list_windows,
+        is_readonly=True,
     ),
     ToolDefinition(
         name="desktop_open_app",
@@ -1253,15 +1410,6 @@ DESKTOP_TOOLS = [
         parameters={"type": "object", "properties": {
             "app_name": {"type": "string", "description": "要打开的目标名称（支持文件夹名如 ffmeng、软件名如 Clash Verge、快捷方式名或绝对路径）"},
             "target": {"type": "string", "description": "同 app_name，目标名称或路径"}
-        }, "required": []},
-        func=desktop_open_app,
-    ),
-    ToolDefinition(
-        name="desktop_open",
-        description="打开 Windows 桌面上的文件夹、应用程序或常规文件（功能同 desktop_open_app）。",
-        parameters={"type": "object", "properties": {
-            "target": {"type": "string", "description": "要打开的目标文件夹名、软件名、快捷方式或路径"},
-            "app_name": {"type": "string", "description": "同 target"}
         }, "required": []},
         func=desktop_open_app,
     ),
@@ -1301,30 +1449,6 @@ DESKTOP_TOOLS = [
         parameters={"type": "object", "properties": {
             "seconds": {"type": "number", "default": 3.0, "description": "等待秒数（0.5 - 60 秒）"},
             "duration": {"type": "number", "description": "同 seconds"}
-        }, "required": []},
-        func=desktop_wait,
-    ),
-    ToolDefinition(
-        name="desktop_sleep",
-        description="等待指定秒数（功能同 desktop_wait）。",
-        parameters={"type": "object", "properties": {
-            "seconds": {"type": "number", "default": 3.0, "description": "等待秒数"}
-        }, "required": []},
-        func=desktop_wait,
-    ),
-    ToolDefinition(
-        name="wait",
-        description="等待指定秒数（功能同 desktop_wait）。",
-        parameters={"type": "object", "properties": {
-            "seconds": {"type": "number", "default": 3.0, "description": "等待秒数"}
-        }, "required": []},
-        func=desktop_wait,
-    ),
-    ToolDefinition(
-        name="sleep",
-        description="等待指定秒数（功能同 desktop_wait）。",
-        parameters={"type": "object", "properties": {
-            "seconds": {"type": "number", "default": 3.0, "description": "等待秒数"}
         }, "required": []},
         func=desktop_wait,
     ),
@@ -1408,3 +1532,22 @@ DESKTOP_TOOLS.extend([
                        "hwnd": {"type": "integer", "description": "目标窗口 HWND 句柄（可选）"}
                    }, "required": []}, func=desktop_probe_app, parallel_safe=False, is_readonly=True),
 ])
+
+
+# B5-01 / B5-02 / B5-05: 工具别名重定向映射表（不进入 LLM schema，但允许透明调用）
+DESKTOP_ALIASES: dict[str, str] = {
+    "desktop_open": "desktop_open_app",
+    "desktop_list_shortcuts": "desktop_list_items",
+    "desktop_sleep": "desktop_wait",
+    "wait": "desktop_wait",
+    "sleep": "desktop_wait",
+}
+
+
+def desktop_open(args: dict):
+    return desktop_open_app(args)
+
+
+def desktop_sleep(args: dict):
+    return desktop_wait(args)
+

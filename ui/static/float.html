@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AlterEgo</title>
+<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="float.css" />
+</head>
+<body class="floatwin">
+
+<!-- ============ 任务浮窗 ============ -->
+<section class="float is-entering" id="float" data-mode="run" aria-label="AlterEgo 任务浮窗" data-od-id="desk-float">
+  <div class="float__edge" aria-hidden="true"><i id="f-edge"></i></div>
+
+  <div class="float__grip" id="float-grip">
+    <div class="float__ava">
+      <img src="/avatar/panda/acting.gif" alt="AlterEgo 形象：正在执行" id="f-ava" width="240" height="426" />
+    </div>
+    <div class="float__id">
+      <div class="float__name"><b class="float__brand">AlterEgo</b> <span class="float__tag" id="f-tag">后台任务</span></div>
+      <div class="float__state">
+        <b class="state-run" id="f-state">正在执行</b>
+        <span id="f-step">· 分片上传 5 / 11</span>
+      </div>
+    </div>
+    <div class="float__tools">
+      <button class="float__ico" type="button" id="f-open" title="打开主窗口" aria-label="打开主窗口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 01-1 1H6a1 1 0 01-1-1V8a1 1 0 011-1h5"/></svg>
+      </button>
+      <button class="float__ico" type="button" id="f-pill" title="收起为胶囊" aria-label="收起为胶囊">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 12h14"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="float__body">
+    <p class="float__goal" id="f-goal">把 alterego-demo.mp4 发布到 B 站，标题与简介沿用记忆模板</p>
+
+    <div class="float__meta">
+      <span class="mono" id="f-pct">36%</span>
+      <span class="dot" aria-hidden="true"></span>
+      <span id="f-bytes">67.1 / 184.2 MB</span>
+      <span class="dot" aria-hidden="true"></span>
+      <span id="f-eta">剩余约 1 分 20 秒</span>
+    </div>
+
+    <div class="float__track" id="f-trackwrap" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="36" aria-label="任务进度">
+      <i id="f-bar"></i>
+    </div>
+
+    <div class="float__gate" id="f-gate" hidden>
+      <div class="gk"><span class="risk risk--l3">L3</span><b>发布前需要你确认一次</b></div>
+      <div class="gv">标题「AlterEgo 桌面 Agent 演示」· 科技分区 · 公开可见且不可撤回</div>
+      <div class="gt">未处理将在 <span class="mono" id="f-ttl">02:41</span> 后自动拒绝</div>
+    </div>
+
+    <div class="float__take" id="f-take" hidden>
+      <div class="gk"><span class="tk__kind">接管</span><b>B 站登录已过期</b></div>
+      <div class="gv">请在已打开的 Chrome 窗口完成扫码登录，再回到这里继续。</div>
+      <div class="gt">任务已暂停 · 已等待 <span class="mono" id="f-wait">00:24</span></div>
+    </div>
+
+    <div class="float__done" id="f-done" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 12.5l5 5L20 6.5"/></svg>
+      <span>已发布 · <span class="mono">BV1Kd4y1X7pQ</span></span>
+    </div>
+
+    <div class="float__acts" id="f-acts">
+      <button class="btn act-secondary" type="button" id="f-main">查看步骤</button>
+      <span class="spacer"></span>
+      <span class="float__hint">主窗口已关闭，任务继续在后台执行</span>
+    </div>
+  </div>
+</section>
+
+<!-- 收起态胶囊 -->
+<button class="pill" id="pill" type="button" hidden aria-label="展开 AlterEgo 浮窗">
+  <span class="pill__ring"><img src="/avatar/panda/acting.gif" alt="" width="240" height="426" /></span>
+  <span class="pill__txt"><b>发布到 B 站</b><span id="pill-sub">上传 36%</span></span>
+  <span class="pill__badge" id="pill-badge" hidden>1</span>
+</button>
+
+<!-- 托盘菜单（浮窗右键唤起） -->
+<div class="traymenu" id="traymenu" hidden role="menu" aria-label="AlterEgo 托盘菜单">
+  <button type="button" data-tray="open" role="menuitem">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>
+    打开主窗口<kbd>Ctrl+O</kbd>
+  </button>
+  <button type="button" data-tray="expand" role="menuitem">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9 9h6v6H9z"/></svg>
+    展开任务浮窗
+  </button>
+  <div class="traymenu__hr"></div>
+  <button type="button" data-tray="pause" role="menuitem">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>
+    暂停当前任务
+  </button>
+  <div class="traymenu__hr"></div>
+  <button type="button" data-tray="quit" role="menuitem">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    退出 AlterEgo
+  </button>
+</div>
+
+<div class="ftoast" id="ftoast" role="status" aria-live="polite"></div>
+
+<script src="float.js?v=p6f"></script>
+</body>
+</html>

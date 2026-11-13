@@ -56,6 +56,33 @@ def test_shell_blocked(registry):
     assert "拒绝" in r.content
 
 
+def test_windows_start_command_runs_through_cmd(monkeypatch):
+    from types import SimpleNamespace
+    from tools import shell_exec
+    calls = []
+    monkeypatch.setattr(shell_exec.sys, "platform", "win32")
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+    monkeypatch.setattr(shell_exec.subprocess, "run", fake_run)
+
+    result = shell_exec._run({"command": "start notepad"})
+
+    assert calls == [["cmd", "/d", "/s", "/c", "start", "notepad"]]
+    assert "exit=0" in result
+
+
+def test_missing_executable_returns_tool_error_without_traceback(monkeypatch):
+    from tools import shell_exec
+    monkeypatch.setattr(shell_exec.sys, "platform", "win32")
+    monkeypatch.setattr(shell_exec.subprocess, "run",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError(2, "missing")))
+
+    result = shell_exec._run({"command": "start notepad"})
+
+    assert result == "[启动失败] 系统找不到命令或可执行文件: start"
+
+
 def test_unknown_tool(registry):
     with pytest.raises(ValueError):
         registry.get("nope")

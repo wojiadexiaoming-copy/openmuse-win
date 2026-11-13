@@ -130,6 +130,66 @@ def test_takeover_api_routes(tmp_path, monkeypatch):
     assert st2["status"] == "completed"
 
 
+def test_takeover_does_not_auto_spawn_float_window(monkeypatch):
+    """§39.18：接管默认不弹桌面浮窗。"""
+    calls = []
+    monkeypatch.setattr(
+        "ui.takeover_window.show_takeover_window_async",
+        lambda *a, **k: calls.append((a, k)),
+    )
+    mgr = TakeoverManager()
+    assert mgr.auto_show_window is False
+    mgr.request_takeover(task_id="t_nofloat", reason="验证码")
+    assert calls == []
+
+
+def test_takeover_ui_mode_skips_generic_notify(monkeypatch):
+    """UI 模式由服务端发可操作 Toast；管理器不再重复弹第二条系统通知。"""
+    notified = []
+    monkeypatch.setattr("agent.notify.notify", lambda **kw: notified.append(kw))
+    events = []
+    mgr = TakeoverManager(on_event=lambda e, d: events.append((e, d)))
+    mgr.request_takeover(task_id="t_ui", reason="滑块")
+    assert notified == []
+    assert events and events[0][0] == "takeover_request"
+
+    # 无 UI 通道（CLI）时保留通用系统通知兜底
+    mgr_cli = TakeoverManager()
+    mgr_cli.request_takeover(task_id="t_cli", reason="滑块")
+    assert len(notified) == 1
+
+
+def test_request_takeover_focuses_browser_first(monkeypatch):
+    """§39.18：发起接管前先把浏览器推到前台，再解锁输入与登记接管。"""
+    from tools.browser.worker import BrowserWorker
+    import agent.takeover as takeover_mod
+
+    bw = BrowserWorker(profile_mgr=MagicMock(), circuit=MagicMock(), profile="test")
+    order = []
+    bw._ensure_maximized = MagicMock(side_effect=lambda: order.append("maximize"))
+    bw._do_focus_window = MagicMock(side_effect=lambda: order.append("focus"))
+    bw.unlock_input_for_human = MagicMock(side_effect=lambda **k: order.append("unlock"))
+    bw._raw_page = MagicMock()
+    bw._raw_page.url = "https://example.com/verify"
+    bw._do_snapshot = MagicMock(return_value="[当前页面] URL: https://example.com/home")
+
+    mgr = TakeoverManager()
+    mgr.request_takeover = MagicMock(side_effect=lambda **k: order.append("request"))
+    # §39.24：worker 改用泵式等待（poll），不再阻塞 Event.wait
+    mgr.poll = MagicMock(
+        return_value=TakeoverResult(task_id="t_focus", outcome="completed"))
+    monkeypatch.setattr(takeover_mod, "get_takeover_manager", lambda: mgr)
+
+    try:
+        res = bw.request_takeover({"reason": "身份验证", "timeout_sec": 1.0})
+    finally:
+        bw.stop()
+
+    assert "[人工接管已完成]" in res
+    assert order[:3] == ["maximize", "focus", "unlock"]
+    assert "request" in order
+
+
 def test_show_takeover_window_async(monkeypatch):
     from ui.takeover_window import show_takeover_window_async
     monkeypatch.setenv("ALTEREGO_HEADLESS", "1")
@@ -272,5 +332,47 @@ def test_browser_verify_code_countdown_failure_with_diagnostics():
     assert "人机验证拦截" in res
     assert "两次输入的密码不一致" in res
     assert "browser_request_takeover" in res
+
+
+def test_takeover_port_and_token_injection(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALTEREGO_LLM_API_KEY", "sk-mock-takeover-key")
+    from ui.server import AgentServer
+
+    server = AgentServer(data_dir=tmp_path)
+    assert server.takeover_mgr.port == server.port
+    assert server.takeover_mgr.token == server.api_token
+    # §39.18：UI 服务不得自动弹接管浮窗（会抢焦点盖住待操作浏览器）
+    assert server.takeover_mgr.auto_show_window is False
+
+    # Change port on server
+    server.port = 5001
+    assert server.takeover_mgr.port == 5001
+
+
+def test_takeover_window_url_with_token(monkeypatch):
+    import sys
+    from ui.takeover_window import show_takeover_window
+
+    captured_url = []
+    class FakeWebview:
+        @staticmethod
+        def create_window(title, url, **kwargs):
+            captured_url.append(url)
+            m = MagicMock()
+            m.expose = MagicMock()
+            return m
+
+        @staticmethod
+        def start(debug=False):
+            pass
+
+    monkeypatch.setitem(sys.modules, "webview", FakeWebview)
+    show_takeover_window("t_tok", "Chrome", "reason", port=5002, token="my-secret-token")
+    assert len(captured_url) == 1
+    assert captured_url[0] == (
+        "http://127.0.0.1:5002/static/float.html"
+        "?task_id=t_tok&target=Chrome&reason=reason&token=my-secret-token"
+    )
+
 
 

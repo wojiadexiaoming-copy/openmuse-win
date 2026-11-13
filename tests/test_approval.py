@@ -128,3 +128,94 @@ def test_list_history():
     assert hist[1]["decision"] == "approved"
 
 
+def test_resolve_card_idempotency_and_versioning():
+    m = _mgr()
+
+    # 1. not found
+    res = m.resolve_card("non-existent-id", True)
+    assert res.get("ok") is False
+    assert res.get("reason") == "not_found"
+
+    # Set up a real pending card
+    ready_evt = threading.Event()
+    def async_ask(card):
+        ready_evt.set()
+        # Wait for resolve_card to set event
+        p = m._pending.get(card.approval_id)
+        if p:
+            p["event"].wait(timeout=2.0)
+            return p.get("decision", False), p.get("scope", "once")
+        return False, "once"
+
+    th = threading.Thread(
+        target=lambda: m.check("file_write", {"path": "test.txt", "content": "123"}, on_ask=async_ask)
+    )
+    th.start()
+    assert ready_evt.wait(timeout=1.0) is True
+
+    card_id = list(m._pending.keys())[0]
+
+    # 2. Version conflict when providing an obsolete version
+    card = m._pending[card_id]["card"]
+    bad_version_res = m.resolve_card(card_id, True, version_id=card.version_id + 99)
+    assert bad_version_res.get("ok") is False
+    assert bad_version_res.get("reason") == "version_conflict"
+
+    # 3. Successful resolution
+    good_res = m.resolve_card(card_id, True, version_id=card.version_id)
+    assert good_res.get("ok") is True
+    assert good_res.get("approved") is True
+
+    # 4. Repeated resolution should return already_consumed
+    repeat_res = m.resolve_card(card_id, True)
+    assert repeat_res.get("ok") is False
+    assert repeat_res.get("reason") == "already_consumed"
+
+    th.join(timeout=1.0)
+
+
+def test_settings_policy_and_target_overrides(tmp_path):
+    from agent.settings import Settings
+
+    settings_file = tmp_path / "settings.json"
+    settings = Settings(settings_file)
+    mgr = ApprovalManager(":memory:", settings=settings)
+
+    # 1. By default, desktop_click is allow (L1 routine tool)
+    assert mgr.check("desktop_click", {"x": 100, "y": 100}) is True
+
+    # 2. User explicitly configures desktop_click = ask
+    settings.set("desktop_click", "ask")
+    # Now desktop_click must prompt (not short-circuited by L1)
+    asked = []
+    res = mgr.check("desktop_click", {"x": 100, "y": 100}, on_ask=lambda c: (asked.append(c) or True, "once"))
+    assert res is True
+    assert len(asked) == 1
+    assert asked[0].action == "desktop_click"
+
+    # 3. User sets target override: deny for app:Recordly
+    settings.set("desktop_click", "allow")
+    settings.set("desktop_click", "deny", target="app:Recordly")
+
+    # Clicking inside Recordly must be denied
+    assert mgr.check("desktop_click", {"app": "Recordly", "x": 100, "y": 100}) is False
+
+    # Clicking outside Recordly (e.g. Notepad) must be allowed
+    assert mgr.check("desktop_click", {"app": "Notepad", "x": 100, "y": 100}) is True
+
+    # 4. User sets target override: ask for domain:sensitive.com
+    settings.set("browser_click", "allow")
+    settings.set("browser_click", "ask", target="domain:sensitive.com")
+
+    asked_browser = []
+    b_res = mgr.check("browser_click", {"url": "https://sensitive.com/pay", "selector": "#btn"},
+                      on_ask=lambda c: (asked_browser.append(c) or True, "once"))
+    assert b_res is True
+    assert len(asked_browser) == 1
+
+    # browser_click on other domains is allowed without asking
+    assert mgr.check("browser_click", {"url": "https://example.com", "selector": "#btn"}) is True
+
+
+
+

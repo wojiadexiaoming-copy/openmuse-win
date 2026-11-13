@@ -5,8 +5,6 @@ M1：只实现 HTTP 透传（POST {query, count}），由配置决定接哪家�
 """
 from __future__ import annotations
 
-import httpx
-
 from agent.tools_registry import ToolDefinition
 
 # 由 tools/__init__.register_all 注入
@@ -20,6 +18,7 @@ def _search(args: dict) -> str:
     query: str = args.get("query", "")
     count: int = int(args.get("count", 5))
     try:
+        import httpx
         r = httpx.post(_API_URL, json={"query": query, "count": count},
                        headers={"Authorization": f"Bearer({_API_KEY})"} if _API_KEY else {},
                        timeout=20)

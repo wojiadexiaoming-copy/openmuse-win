@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "generic": {
+    "protocol": "openai_chat",
+    "temperature": "unknown",
+    "top_p": "unknown",
+    "tools": "unknown",
+    "stream": "unknown",
+    "vision": "unknown",
+    "response_format": "unknown",
+    "reasoning": "unknown",
+    "max_tokens_field": "max_tokens",
+    "tool_choice": "auto",
+    "drop_optional_params": true
+  },
+  "vendors": {
+    "qoder": {
+      "temperature": "unsupported",
+      "tools": "supported",
+      "stream": "supported",
+      "vision": "unknown",
+      "max_tokens_field": "max_tokens"
+    },
+    "qoderCn": {
+      "temperature": "unsupported",
+      "tools": "supported",
+      "stream": "supported",
+      "vision": "unknown",
+      "max_tokens_field": "max_tokens"
+    }
+  },
+  "models": {
+    "qoder/DeepSeek-Flash": {
+      "reasoning": "supported"
+    },
+    "qoderCn/DeepSeek-Flash": {
+      "reasoning": "supported"
+    }
+  }
+}

@@ -123,3 +123,13 @@ def test_snapshot_includes_modal_header():
     w._do_layout_tree = lambda args: "  1. [文本框] 说点什么"
     snap = w._do_snapshot({})
     assert "[活跃浮层] 笔记详情浮层 (容器: .note-detail-mask)" in snap
+
+
+def test_modal_heuristic_rejects_portal_shells():
+    """浮层识别 JS 必须排除 portal/popover/toast 等常驻容器，且要求真实可交互。"""
+    import inspect
+    from tools.browser import worker as worker_mod
+    js = inspect.getsource(worker_mod.BrowserWorker._detect_active_modal)
+    for token in ("classExcludes", "'portal'", "'toast'", "pointerEvents",
+                  "document.elementFromPoint", "if (!sel) continue;"):
+        assert token in js

@@ -118,3 +118,21 @@ def test_archive_preserves_message_content():
         ).fetchall()
         con.close()
         assert rows == [("user", "hello"), ("assistant", "world")]
+
+
+def test_archive_pruning_max_keep():
+    """T05: 验证归档目录最多保留 max_keep=20 个历史文件，超出自动清理最老文件。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "conv.db")
+        arc_dir = os.path.join(tmp, "archive")
+        store = _make_store(db_path)
+
+        for i in range(25):
+            sid = store.new_session(title=f"session-{i}")
+            store.save_history(sid, [Message(role="user", content=f"msg-{i}")])
+
+        store.archive_old_sessions(arc_dir, keep_session_id=None)
+        store.close()
+
+        files = [f for f in os.listdir(arc_dir) if f.startswith("conversations_") and f.endswith(".db")]
+        assert len(files) <= 20

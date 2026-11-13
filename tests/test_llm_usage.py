@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 import sqlite3
+import time
 import zipfile
 
 import httpx
@@ -207,13 +208,19 @@ def test_legacy_trace_migration_and_export_do_not_claim_completion_or_zero_usage
         db.execute("CREATE TABLE spans (trace_id TEXT, span_id TEXT PRIMARY KEY, parent_id TEXT,"
                    "kind TEXT, name TEXT, started_at REAL, ended_at REAL, status TEXT,"
                    "tokens_in INTEGER, tokens_out INTEGER)")
-        db.execute("INSERT INTO spans VALUES ('legacy','open',NULL,'llm','model',1,NULL,'ok',0,0)")
-        db.execute("INSERT INTO spans VALUES ('legacy','done',NULL,'llm','model',2,3,'ok',4,2)")
+        # 未闭合行须用近期时间戳：更早的孤儿行会被启动清扫标记为 abandoned
+        # （见 tests/test_terminal_state_race.py::test_tracer_sweeps_abandoned_spans_on_startup）
+        now = time.time()
+        done_at = now - 60
+        db.execute("INSERT INTO spans VALUES ('legacy','open',NULL,'llm','model',?,NULL,'ok',0,0)",
+                   (now - 120,))
+        db.execute("INSERT INTO spans VALUES ('legacy','done',NULL,'llm','model',?,?,'ok',4,2)",
+                   (now - 90, done_at))
     tracer = Tracer(str(db_path))
     assert tracer.db.execute("SELECT status FROM spans WHERE span_id='open'").fetchone()[0] == "running"
     spans = tracer.read_spans("legacy")
     assert spans[0]["status"] == "running" and spans[0]["ended_at"] is None
-    assert spans[1]["status"] == "ok" and spans[1]["ended_at"] == 3
+    assert spans[1]["status"] == "ok" and spans[1]["ended_at"] == done_at
     assert all(row["usage_available"] is False and row["tokens_in"] is None
                and row["tokens_out"] is None for row in spans)
     # Defensive reads also normalize an old writer inserting ok without ended_at.

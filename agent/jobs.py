@@ -26,10 +26,17 @@ class JobScheduler:
         tz = self.config.get("jobs", {}).get("timezone", "Asia/Shanghai")
         self.sched = BackgroundScheduler(timezone=tz)
         if state_path is None:
-            state_path = os.path.join(os.path.expanduser("~"),
-                                       ".alterego", "jobs", "state.json")
+            try:
+                from agent.paths import resolve_sub_dir
+                state_path = str(resolve_sub_dir("jobs", "state.json"))
+            except Exception:
+                state_path = os.path.join(os.path.expanduser("~"),
+                                           ".alterego", "jobs", "state.json")
         self.state_path = state_path
-        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        except (PermissionError, OSError):
+            pass
 
     # ---- 水位线（幂等） ----
     def get_watermark(self, job_id: str) -> float:

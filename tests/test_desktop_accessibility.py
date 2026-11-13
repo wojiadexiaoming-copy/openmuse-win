@@ -264,6 +264,16 @@ def test_focus_control_confirms_exact_reference_after_set_focus(install_backend)
     assert "requested_control_ref_match" in result["focus"]["evidence"]
 
 
+def test_common_dialog_editable_control_can_be_focused_despite_focusable_flag(install_backend):
+    edit = Info(2, "文件名:", focusable=False)
+    edit.patterns["Value"] = SimpleNamespace(CurrentIsReadOnly=False, CurrentValue="")
+    backend = install_backend(Backend([window().add(edit)]))
+    result = call("focus_control", hwnd=100, control_ref="uia:42.2")
+    assert result["ok"] and result["focus"]["editable"]
+    assert result["focus"]["control_ref"] == "uia:42.2"
+    assert backend.focus_calls == [edit]
+
+
 def test_duplicate_control_reference_does_not_focus_arbitrary_first(install_backend):
     one, two = Info(2, "One"), Info(2, "Two")
     backend = install_backend(Backend([window().add(one, two)]))

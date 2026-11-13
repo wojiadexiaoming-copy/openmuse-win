@@ -5,8 +5,8 @@
 
 llm:
   provider: "openai_compatible"
-  base_url: "https://apihub.agnes-ai.com/v1"
-  model: "agnes-3.0-flash"
+  base_url: "http://127.0.0.1:53683/v1"
+  model: "auto"
   temperature: 0.2
   max_tokens: 8192
   supports_images: true
@@ -20,12 +20,36 @@ llm:
     supports_images: true
 
 # 按角色的模型路由表（主 Agent / Planner / 子 Agent / 后台 Worker）
+  fallback_chain: &id001
+  - model: agnes-3.0-flash
+    base_url: https://apihub.agnes-ai.com/v1
+    supports_images: true
+    enabled: true
+  - model: qwen3.8-omni-flash
+    base_url: 
+      https://dashscope.aliyuncs.com/compatible-mode/v1
+    supports_images: true
+    enabled: true
+  - model: kimi-k3
+    base_url: 
+      https://dashscope.aliyuncs.com/compatible-mode/v1
+    supports_images: true
+    enabled: true
+  - model: qwen3.8-max
+    base_url: 
+      https://dashscope.aliyuncs.com/compatible-mode/v1
+    supports_images: true
+    enabled: true
+  - model: gemini-3.5-flash
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    supports_images: true
+    enabled: true
 models:
   roles:
     main:
       provider: "openai_compatible"
-      base_url: "https://apihub.agnes-ai.com/v1"
-      model: "agnes-3.0-flash"
+      base_url: "http://127.0.0.1:53683/v1"
+      model: "auto"
       temperature: 0.2
       max_tokens: 8192
       supports_images: true
@@ -37,12 +61,13 @@ models:
         temperature: 0.2
         max_tokens: 8192
         supports_images: true
+      fallback_chain: *id001
     planner:
       ref: "main"   # 与主同级，直接复用 main 配置
     subagent:
       provider: "openai_compatible"
-      base_url: "https://apihub.agnes-ai.com/v1"
-      model: "agnes-3.0-flash"
+      base_url: "http://127.0.0.1:53683/v1"
+      model: "auto"
       temperature: 0.2
       max_tokens: 8192
       supports_images: true
@@ -55,10 +80,11 @@ models:
         supports_images: true
     worker:
       provider: "openai_compatible"
-      base_url: "https://apihub.agnes-ai.com/v1"
-      model: "agnes-3.0-flash"
+      base_url: "http://127.0.0.1:53683/v1"
+      model: "auto"
       temperature: 0.3
       max_tokens: 2048
+      supports_images: false
   critical_subagent_role: "main"
 
 # 图像与视频多模态模型配置（spec §24 / §30）
@@ -76,6 +102,12 @@ context:
 agent:
   max_iters: 25          # 软上限：到后按进展水位决定续杯或收尾（代替笨计数器）
   max_iters_hard: 100    # 硬上限：防跑飞的绝对天花板
+  max_turn_wall_clock_sec: 600   # 主 Agent 单条消息墙钟初始上限（秒）
+  turn_extension_sec: 180        # 有真实进展时每次续期秒数
+  turn_max_extensions: 3         # 最多续期次数（0=到点即收尾）
+  subagent_max_turn_sec: 300     # 子 Agent 单轮墙钟初始上限（秒）
+  subagent_turn_extension_sec: 120  # 子 Agent 有进展时的续期秒数
+  subagent_max_extensions: 2     # 子 Agent 最多续期次数
   workspace: "."          # file_* 工具允许的根目录
   parallel_tools: false   # M4 §5.5 工具并行（默认关，串行更稳）
   task_tracker: true      # §31.6 任务进度后端
@@ -94,3 +126,10 @@ tools:
     split_screen: true     # 左右并排分屏：左侧 70% 浏览器实时显示，右侧 30% UI 桌面窗口
     browser_ratio: 0.70    # 浏览器所占屏幕工作区宽度比例 (0.70 = 70%)
 
+
+# 行为偏好与运行时安全防护配置
+behavior:
+  approval_timeout_sec: 180      # 审批超时时间（秒，默认 3 分钟 fail-closed 自动拒绝）
+  hazardous_default_scope: "session"  # 危险动作默认授权粒度 (session: 本会话, once: 仅本次, always: 始终允许)
+  tray_resident: true            # 托盘常驻：关闭窗口后继续在后台执行任务
+  auto_failover: true            # 模型调用失败自动按备用链降级

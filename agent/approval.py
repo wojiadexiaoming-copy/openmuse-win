@@ -224,6 +224,12 @@ class ApprovalCard:
     # §36.12 分布式乐观锁：多端（Web/手机）同时操作同一张卡时，
     # 提交必须携带 version_id；若版本已变，提交失效并提示"已被其他端处理"
     version_id: int = 0
+    # 微信免键鼠审批：卡片必须记住"推给了谁、属于哪个会话"，
+    # 否则回执无法绑定发送者，也无法把决议同步回正确的会话。
+    target_user: str = ""
+    session_id: str = ""
+    # 会话/永久授权的作用域键（文件写入按目标路径，其余按完整参数）
+    scope_key: str = ""
 
     @property
     def risk_level(self) -> str:
@@ -268,7 +274,7 @@ class ApprovalManager:
         self.settings = settings  # Settings（§37）：常驻策略先行
         # 待用户决策的卡：approval_id -> {"event": Event, "decision": bool|None}
         self._pending: dict[str, dict] = {}
-        # 会话许可：wkey -> True（本任务内同类免批）
+        # 会话许可：wkey -> True（本任务内工具+参数完全一致才免批）
         self._session_ok: set[str] = set()
 
     # ---------- 风险定级 ----------
@@ -293,6 +299,29 @@ class ApprovalManager:
             json.dumps(clean, sort_keys=True, ensure_ascii=False, default=str).encode()
         ).hexdigest()[:16]
         return f"{tool}:{sig}"
+
+    @staticmethod
+    def _normalized_path(path: str) -> str:
+        try:
+            from tools.file_tools import WORKSPACE
+            return str((WORKSPACE / path).resolve()).replace("\\", "/").lower()
+        except Exception:
+            return str(path).replace("\\", "/").lower()
+
+    def _scope_key(self, tool: str, args: dict) -> str:
+        """会话/永久授权的作用域键。
+
+        文件写入按目标路径授权：同一文件在一次任务里被反复改写（修脚本、
+        补内容）不该每次都弹卡；其余工具仍绑定完整参数，避免"批准一次
+        命令就放行所有命令"的越权面。
+        """
+        if tool in ("file_write", "file_edit") and isinstance(args, dict):
+            path = args.get("path")
+            if isinstance(path, str) and path.strip():
+                normalized = self._normalized_path(path.strip())
+                sig = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+                return f"{tool}:path:{sig}"
+        return self._wkey(tool, args)
 
     @staticmethod
     def _extract_target(tool: str, args: dict) -> str:
@@ -379,21 +408,25 @@ class ApprovalManager:
         elif risk == "L1":
             return True
         wkey = self._wkey(tool, args)
+        scope_key = self._scope_key(tool, args)
         with self._lock:
-            if (risk != "L3" and self._in_whitelist(wkey)) or wkey in self._session_ok:
+            if ((risk != "L3" and self._in_whitelist(scope_key))
+                    or wkey in self._session_ok or scope_key in self._session_ok):
                 return True
         if on_ask is None:
             return False  # 无人可问 → Fail Closed
 
-        # §36.9：5 分钟内同工具+同风险的卡合并（L3 永不合并）
-        host = self._find_batch_host(tool, risk) if risk != "L3" else None
+        # §36.9：5 分钟内同一目标（文件按路径，其余按完整参数）+ 同风险的卡合并；
+        # 不同目标绝不合并，避免"批准 A 文件顺手放行 B 文件"。
+        host = self._find_batch_host(tool, risk, scope_key) if risk != "L3" else None
         if host is not None:
             approved, scope = self._wait_on_host(host)
             # 并入的卡单独记一行（ID 加后缀，不与宿主卡主键冲突）
             merged = ApprovalCard(
                 approval_id=host["card"].approval_id + f"#m{wkey[:8]}",
-                action=tool, detail=host["card"].detail, risk=risk)
-            self._record(merged, approved, scope, wkey)
+                action=tool, detail=host["card"].detail, risk=risk,
+                scope_key=scope_key)
+            self._record(merged, approved, scope, scope_key)
             return approved
 
         # 预先拦截绝对危险违规模式，直接拒绝，避免给用户弹出注定失败的无谓骚扰弹窗
@@ -413,7 +446,7 @@ class ApprovalManager:
             summary_cn=Vault.scrub_text(summary_cn),
             detail_cn=Vault.scrub_text(detail_cn),
             intent_cn=Vault.scrub_text(intent_cn),
-            timeout_sec=self.timeout_sec)
+            timeout_sec=self.timeout_sec, scope_key=scope_key)
         with self._lock:
             if card.approval_id in self._pending:
                 logger.error("审批 ID 冲突，拒绝覆盖: %s", card.approval_id)
@@ -433,7 +466,7 @@ class ApprovalManager:
                 p["decision"] = approved
                 p["scope"] = scope
                 p["event"].set()
-        self._record(card, approved, scope, wkey)
+        self._record(card, approved, scope, scope_key)
         return approved
 
     def check_async(self, tool: str, args: dict, prov_level: int = 0) -> bool:
@@ -490,8 +523,9 @@ class ApprovalManager:
 
         # 需要审批：创建卡片并抛出中断，不阻塞
         wkey = self._wkey(tool, args)
+        scope_key = self._scope_key(tool, args)
         with self._lock:
-            if wkey in self._session_ok:
+            if wkey in self._session_ok or scope_key in self._session_ok:
                 return True
 
         action_cn, summary_cn, detail_cn, intent_cn = humanize_approval(tool, args)
@@ -504,7 +538,7 @@ class ApprovalManager:
             summary_cn=Vault.scrub_text(summary_cn),
             detail_cn=Vault.scrub_text(detail_cn),
             intent_cn=Vault.scrub_text(intent_cn),
-            timeout_sec=self.timeout_sec)
+            timeout_sec=self.timeout_sec, scope_key=scope_key)
         with self._lock:
             if card.approval_id in self._pending:
                 logger.error("审批 ID 冲突，拒绝覆盖: %s", card.approval_id)
@@ -525,12 +559,13 @@ class ApprovalManager:
             card.approval_id, tool, risk)
         raise ApprovalPendingInterrupt(card.approval_id, tool, safe_args)
 
-    def _find_batch_host(self, tool: str, risk: str) -> dict | None:
-        """找 5 分钟内同工具+同风险的在途卡。"""
+    def _find_batch_host(self, tool: str, risk: str, scope_key: str) -> dict | None:
+        """找 5 分钟内同一目标 + 同风险的在途卡。"""
         with self._lock:
             for p in self._pending.values():
                 c = p["card"]
                 if (c.action == tool and c.risk == risk
+                        and getattr(c, "scope_key", "") == scope_key
                         and time.time() - c.created_at < 300
                         and p["decision"] is None):
                     return p
@@ -544,7 +579,7 @@ class ApprovalManager:
             s = host.get("scope", "once")
         return (bool(d), s)
 
-    def _record(self, card: ApprovalCard, approved: bool, scope: str, wkey: str):
+    def _record(self, card: ApprovalCard, approved: bool, scope: str, scope_key: str):
         # 用户已批准 L3 放开 always（2026-10-15），但危险操作永不给 always
         try:
             from .risk import _DANGEROUS_TOOLS
@@ -560,9 +595,9 @@ class ApprovalManager:
             if approved and scope == "always":
                 self.db.execute(
                     "INSERT OR REPLACE INTO whitelist VALUES (?,?,?)",
-                    (wkey, card.action, time.time()))
+                    (scope_key, card.action, time.time()))
             if approved and scope == "session":
-                self._session_ok.add(wkey)
+                self._session_ok.add(scope_key)
             self.db.commit()
 
     def _record_denied(self, tool: str, args: dict):

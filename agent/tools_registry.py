@@ -6,6 +6,7 @@ M4 才加：并行执行（§5.5）、结果缓存（§7.3）、资源锁（§5.
 from __future__ import annotations
 
 import logging
+import threading
 
 from dataclasses import dataclass, field
 
@@ -28,9 +29,27 @@ class ToolDefinition:
     is_readonly: bool = False   # 是否为纯只读操作
     cacheable: bool = False     # 是否允许结果缓存
     cache_ttl_sec: int = 0      # 缓存有效时间（秒）
+    precheck: object = None     # (args)->str|None：执行层前置校验，先于人工审批
 
 
 class ToolRegistry:
+    # v1.5.21 P1-4：只读观察不消耗"每轮 1 次直接动作"额度。
+    # 收尾时主 Agent 常用 snapshot/evaluate/probe 核实现状，这一步不该把动作额度吃掉，
+    # 否则"只差最后一下点击"也只能再开一轮。
+    _BROWSER_READONLY_TOOLS = frozenset({
+        "browser_snapshot", "browser_screenshot", "browser_evaluate",
+        "browser_find_text", "browser_probe_at", "browser_inspect",
+        "browser_react_probe",
+        "browser_console", "browser_network_log", "browser_wait",
+        "browser_wait_for", "browser_observe", "browser_storage",
+        "browser_resource", "browser_handler", "browser_verify_code_countdown",
+        "browser_tabs", "browser_switch_tab", "browser_context_list",
+    })
+    # v1.5.22 P1-1：求助出口不受额度约束。被"动作额度用完"挡住求助，
+    # 会把 Agent 困在"不能继续做、也不能交人工"的死角（v1.5.21 实测）。
+    _BROWSER_ESCALATION_TOOLS = frozenset({"browser_request_takeover"})
+    _BROWSER_READONLY_CAP = 8  # 只读也要有上限，防拿观察当推进刷轮次
+
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
         self._aliases: dict[str, str] = {}
@@ -39,10 +58,23 @@ class ToolRegistry:
         self.cache = None     # ToolResultCache（M4 §7.3）
         self.locks = None     # ResourceLock（M4 §5.9）
         self._desktop_tokens = __import__("contextvars").ContextVar("registry_desktop_tokens", default=())
+        # 主 Agent 浏览器委派门禁：有子 Agent 管理器时启用，每轮只留 1 次直接操作额度
+        self.browser_delegation_required = False
+        self._browser_direct_calls: dict[str, int] = {}
+        self._browser_readonly_calls: dict[str, int] = {}
+        self._browser_verify_granted: set[str] = set()
+        self._browser_direct_lock = threading.Lock()
 
     def begin_turn(self, scope_id):
         from tools.desktop_runtime import begin_turn
         self._desktop_tokens.set(self._desktop_tokens.get() + (begin_turn(scope_id),))
+        if getattr(self, "browser_delegation_required", False):
+            caller = getattr(threading.current_thread(), "_lease_caller_id", None)
+            with self._browser_direct_lock:
+                self._browser_direct_calls[caller] = 0
+                self._browser_readonly_calls[caller] = 0
+                if caller == "main":
+                    self._browser_verify_granted.clear()
 
     def end_turn(self):
         from tools.desktop_runtime import end_turn
@@ -183,6 +215,43 @@ class ToolRegistry:
         if val_err:
             return Message(role="tool", name=name, content=val_err)
 
+        # 主 Agent 浏览器委派门禁（§39.7）：避免主 Agent 亲自连轴驱动浏览器。
+        # 每轮仅保留 1 次直接动作额度（点击/输入/按键/导航）；只读观察不消耗额度，
+        # 这样"子任务只差最后一步"时主 Agent 能先核实现状再补一下动作（v1.5.21 P1-4）。
+        if (name.startswith("browser_")
+                and name not in self._BROWSER_ESCALATION_TOOLS
+                and getattr(self, "browser_delegation_required", False)):
+            caller_id = getattr(threading.current_thread(), "_lease_caller_id", None)
+            if caller_id == "main":
+                readonly = name in self._BROWSER_READONLY_TOOLS
+                with self._browser_direct_lock:
+                    if readonly:
+                        seen = int(self._browser_readonly_calls.get(caller_id, 0))
+                        if seen >= self._BROWSER_READONLY_CAP:
+                            return Message(role="tool", name=name, content=(
+                                f"[浏览器观察额度用尽] 本轮只读浏览器调用已达 {self._BROWSER_READONLY_CAP} 次，"
+                                f"{name} 未执行。不要再用 snapshot/evaluate/probe 打转："
+                                "要么把多步任务交给浏览器子 Agent，要么基于现有证据收尾；"
+                                "如只剩一个明确动作（已定位的 ref/坐标），直接用那 1 次动作额度完成"
+                                "（动作后只读计数会重置）；实在做不下去就 browser_request_takeover 交人工。"))
+                        self._browser_readonly_calls[caller_id] = seen + 1
+                    else:
+                        used = int(self._browser_direct_calls.get(caller_id, 0))
+                        if used >= 1:
+                            return Message(role="tool", name=name, content=(
+                                "[浏览器任务须委派] 主 Agent 本轮已用完 1 次直接浏览器动作额度"
+                                "（只读观察不占额度），"
+                                f"{name} 未执行。多步/连续浏览器操作必须交给浏览器子 Agent：\n"
+                                "1) spawn_subagent(brief=\"入口 URL / 完成标准 / 需回传的证据\", kind=\"browser\")\n"
+                                "2) poll_subagent(task_id=...) 等待结果，期间不要再调用任何 browser_* 工具\n"
+                                "3) 不要取消健康子任务来抢浏览器；只有连续两次验收失败或用户明确要求时才接管\n"
+                                "本轮不再提供直接浏览器动作额度。请基于子 Agent 回传的证据完成答复；"
+                                "如确需亲自复查，可在下一轮继续（不要要求用户代为操作）；"
+                                "确实无法继续时可调用 browser_request_takeover（求助出口不受额度限制）。"))
+                        self._browser_direct_calls[caller_id] = used + 1
+                        # v1.5.22 P2：动作后重新截图/回读是正常核验流程，只读额度随动作重置。
+                        self._browser_readonly_calls[caller_id] = 0
+
         # 提取参数中可能携带的 _provenance 并从入参中移除，避免污染工具函数
         if isinstance(args, dict) and "_provenance" in args:
             arg_prov = args.pop("_provenance")
@@ -214,6 +283,16 @@ class ToolRegistry:
                 if stop is not None:
                     return stop
                 return Message(role="tool", name=name, content="[桌面验证失败] " + str(exc))
+        # 执行层前置校验：注定被拒的调用不进人工审批，避免用户为无效参数反复授权。
+        # 这里只做与执行无关的纯检查；真正的执行校验仍在工具函数内（fail-closed）。
+        if getattr(tool, "precheck", None) is not None:
+            try:
+                pre_err = tool.precheck(args)
+            except Exception as exc:  # noqa: BLE001 —— 预校验自身异常不能拖垮执行链
+                logger.debug("precheck 异常 tool=%s: %s", name, exc)
+                pre_err = None
+            if pre_err:
+                return Message(role="tool", name=name, content=str(pre_err))
         # §27.5 指令溯源：没写来源按最坏情况（L2）处理
         prov_level = (_provenance or {}).get("level", 2)
         mgr = approval or self.approval
@@ -230,17 +309,34 @@ class ToolRegistry:
             hit = self.cache.get(name, args, prov_level=prov_level)
             if hit is not None:
                 return Message(role="tool", name=name, content=hit + "\n[缓存命中]")
-        # 浏览器租约仲裁（主 Agent / 子 Agent 互斥）
+        # 浏览器租约仲裁（主 Agent / 子 Agent 互斥，§5.9）
         if name.startswith("browser_") and hasattr(self, "browser_worker") and self.browser_worker:
             bw = self.browser_worker
             if hasattr(bw, "check_lease"):
-                import threading
                 caller_id = getattr(threading.current_thread(), "_lease_caller_id", None)
+                owner = bw.current_lease_owner() if hasattr(bw, "current_lease_owner") else None
                 if not bw.check_lease(caller_id):
-                    owner = bw.current_lease_owner() if hasattr(bw, "current_lease_owner") else "未知"
+                    if isinstance(caller_id, str) and caller_id.startswith("sub:"):
+                        guidance = (
+                            "子 Agent 只有以 kind=\"browser\" 派发时才会持有租约；"
+                            "请把浏览器任务交给浏览器子 Agent，或改用非浏览器手段。")
+                    else:
+                        guidance = (
+                            "不要取消正在执行的子任务来抢浏览器；先 poll_subagent 看进度，"
+                            "或改做不依赖浏览器的步骤。只有连续两次验收失败或用户明确要求接管时，"
+                            "才 cancel_subagent 后重试。")
                     return Message(
                         role="tool", name=name,
-                        content=f"[租约冲突] 浏览器当前由 {owner} 独占占用，调用方无法执行 {name}"
+                        content=(f"[浏览器由子任务占用] 浏览器当前由 {owner or '未知'} 独占（单写者租约），"
+                                 f"{name} 未执行。{guidance}")
+                    )
+                if (isinstance(caller_id, str) and caller_id.startswith("sub:")
+                        and owner != caller_id):
+                    return Message(
+                        role="tool", name=name,
+                        content=(f"[租约冲突] {name} 需要浏览器独占租约，而当前子任务没有持有"
+                                 "（子 Agent 只有 kind=\"browser\" 派发时才会取得租约）。"
+                                 "请把浏览器任务交给浏览器子 Agent，或改用非浏览器手段。")
                     )
         # M4 §5.9：资源锁
         resources = resource_ids_for(name, args) if self.locks else []
@@ -260,6 +356,13 @@ class ToolRegistry:
                 else:
                     message = Message(role="tool", name=name, content=str(result))
             except Exception as e:  # noqa: BLE001 —— 工具异常必须兜住，不能崩主循环
+                from tools.browser.worker import BrowserCallTimeout
+                if isinstance(e, BrowserCallTimeout):
+                    # 超时不是普通失败：内容本身已含恢复指引，原样回给模型
+                    from vault.manager import Vault
+                    logger.warning("工具超时 tool=%s args=%s: %s", name, args, e)
+                    return Message(role="tool", name=name,
+                                   content=Vault.scrub_text(str(e)))
                 logger.error("工具执行异常 tool=%s args=%s", name, args, exc_info=True)
                 stop = self._desktop_safety_stop(name, e)
                 if stop is not None:
@@ -270,6 +373,23 @@ class ToolRegistry:
             from vault.manager import Vault
             if message.content:
                 message.content = Vault.scrub_text(message.content)
+            # 子 Agent 交付后，给主 Agent 一次直接核对额度；接管（取消子任务）同样恢复额度。
+            if getattr(self, "browser_delegation_required", False):
+                caller_id = getattr(threading.current_thread(), "_lease_caller_id", None)
+                content = message.content or ""
+                if caller_id == "main":
+                    grant = False
+                    if name == "poll_subagent" and content.startswith("[子 Agent 执行完毕]"):
+                        tid = str(args.get("task_id") or "")
+                        with self._browser_direct_lock:
+                            grant = bool(tid) and tid not in self._browser_verify_granted
+                            if grant:
+                                self._browser_verify_granted.add(tid)
+                    elif name == "cancel_subagent" and content.startswith("[子 Agent 已取消]"):
+                        grant = True
+                    if grant:
+                        with self._browser_direct_lock:
+                            self._browser_direct_calls["main"] = 0
             # M4 §7.3：写操作后清读缓存，否则写入缓存 (ToolDefinition.cacheable 优先)
             if self.cache and terminal_tool_control(message) is None:
                 if name in ("file_write", "file_edit"):

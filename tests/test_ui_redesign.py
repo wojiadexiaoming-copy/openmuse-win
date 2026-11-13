@@ -15,8 +15,16 @@ from ui.server import AgentServer
 
 @pytest.fixture
 def test_server(tmp_path, monkeypatch):
+    import shutil
+    from pathlib import Path
     monkeypatch.setenv("ALTEREGO_LLM_API_KEY", "sk-mock-auth-key")
     server = AgentServer(data_dir=tmp_path)
+    root_cfg = Path(__file__).resolve().parent.parent / "config.yaml"
+    tmp_cfg = tmp_path / "config.yaml"
+    if root_cfg.is_file():
+        shutil.copy2(root_cfg, tmp_cfg)
+    server.config_path = tmp_cfg
+    server.cfg.setdefault("models", {}).setdefault("roles", {}).setdefault("main", {})["model"] = "qwen3.8-omni-flash"
     return server
 
 
@@ -148,6 +156,28 @@ def test_messages_strips_raw_json(test_server):
     assert "我已经为你打开了" in final_msg["content"]
 
 
+def test_messages_maps_system_notice_and_exposes_task_goal(test_server):
+    """系统通知按 assistant_notice 下发（不冒充用户消息），用户消息携带 task_goal 供任务卡命名。"""
+    sid = test_server.store.new_session("任务卡标题")
+    history = [
+        Message(role="user", content="重试", metadata={"task_goal": "去那曲市的旅游攻略"}),
+        Message(role="system", content="[时间预算] 本轮已用约 80%（剩余 66 秒）"),
+        Message(role="assistant", content="## 那曲旅游攻略正文"),
+    ]
+    test_server.store.save_history(sid, history)
+
+    headers = {"Authorization": f"Bearer {test_server.api_token}"}
+    status, _, body = _call_api(test_server.app, "GET", f"/api/sessions/{sid}/messages", headers=headers)
+    assert status.startswith("200")
+    msgs = json.loads(body)
+
+    assert [m["type"] for m in msgs] == ["user", "assistant_notice", "assistant_final"]
+    assert [m["role"] for m in msgs] == ["user", "agent", "agent"]
+    assert msgs[0]["task_goal"] == "去那曲市的旅游攻略"
+    assert msgs[1]["content"].startswith("[时间预算]")
+    assert msgs[2]["task_goal"] == ""
+
+
 def test_chat_triggers_background_distill_without_error(test_server, monkeypatch):
     """验证 /api/chat 异步触发记忆提炼正常执行，不会抛出 NameError 线程异常。"""
     import time
@@ -211,8 +241,7 @@ def test_window_split_ratio_endpoint(test_server):
     data_80 = json.loads(body)
     assert data_80["ok"] is True
     assert data_80["browser_ratio"] == 0.80
-    assert mock_window.move.called
-    assert mock_window.resize.called
+    assert not mock_window.move.called  # 确保不会在用户交互时意外强行位移窗口导致跳动
 
     # 2. 切换为展开态 (70% 浏览器, 30% UI)
     status, _, body = _call_api(
@@ -312,6 +341,7 @@ def test_dynamic_models_endpoint(test_server):
 def test_switch_model_and_custom_model_lifecycle(test_server, monkeypatch):
     """测试动态切换主模型，以及动态添加、持久化与删除自定义模型。"""
     headers = {"Authorization": f"Bearer {test_server.api_token}"}
+    monkeypatch.setenv("ALTEREGO_LLM_API_KEY", "sk-mock-primary")
     monkeypatch.setenv("ALTEREGO_AGNES_API_KEY", "sk-mock-agnes")
     monkeypatch.setenv("ALTEREGO_LLM_API_KEY", "sk-mock-custom")
 
@@ -448,7 +478,267 @@ def test_per_role_model_binding_and_status(test_server):
     assert res_fb["roles"]["fallback"]["base_url"] == "http://127.0.0.1:53683/v1"
 
 
+def test_delete_custom_model_with_channel_fallback(test_server):
+    """测试删除自定义模型后，对应绑定的渠道自动回退到第一个可用大模型。"""
+    headers = {"Authorization": f"Bearer {test_server.api_token}"}
+
+    # 1. 尝试删除核心容灾锚点模型 auto，应被保护拒绝
+    status, _, body = _call_api(
+        test_server.app, "DELETE", "/api/models/auto", headers=headers
+    )
+    assert status.startswith("200")
+    res_err = json.loads(body)
+    assert res_err["ok"] is False
+    assert "核心容灾锚点" in res_err["error"]
+
+    # 2. 添加并绑定自定义模型 my-custom-model 至 worker 渠道
+    add_payload = {
+        "model": "my-custom-model",
+        "base_url": "https://api.mycustom.com/v1",
+        "api_key": "sk-custom-test-key",
+        "target_role": "worker"
+    }
+    status, _, body = _call_api(
+        test_server.app,
+        "POST",
+        "/api/settings/save_model_config",
+        headers=headers,
+        body=add_payload
+    )
+    assert status.startswith("200")
+    res_add = json.loads(body)
+    assert res_add["ok"] is True
+    assert res_add["roles"]["worker"]["model"] == "my-custom-model"
+
+    # 也将 subagent 绑定到同一个自定义模型
+    sub_payload = {
+        "model": "my-custom-model",
+        "base_url": "https://api.mycustom.com/v1",
+        "api_key": "sk-custom-test-key",
+        "target_role": "subagent"
+    }
+    _call_api(test_server.app, "POST", "/api/settings/save_model_config", headers=headers, body=sub_payload)
+
+    # 验证列表中包含该自定义模型
+    status, _, body = _call_api(test_server.app, "GET", "/api/models", headers=headers)
+    assert status.startswith("200")
+    models_res = json.loads(body)
+    found_custom = any(m["id"] == "my-custom-model" for m in models_res["models"])
+    assert found_custom is True
+    first_available = models_res["models"][0]["id"]
+
+    # 3. 删除该自定义模型
+    status, _, body = _call_api(
+        test_server.app, "DELETE", "/api/models/my-custom-model", headers=headers
+    )
+    assert status.startswith("200")
+    del_res = json.loads(body)
+    assert del_res["ok"] is True
+    assert del_res["deleted"] == "my-custom-model"
+    assert del_res["fallback_model"] == first_available
+    assert "worker" in del_res["reset_roles"]
+    assert "subagent" in del_res["reset_roles"]
+
+    # 4. 验证受影响渠道 worker 和 subagent 均已默认回退至第一个模型
+    assert del_res["roles"]["worker"]["model"] == first_available
+    assert del_res["roles"]["subagent"]["model"] == first_available
+    # 自定义模型不再在模型列表中
+    assert all(m["id"] != "my-custom-model" for m in del_res["models"])
+
+
+def test_delete_preset_model_fallback_to_anchor(test_server):
+    """测试删除非锚点的预设模型（如 agnes-3.0-flash），其关联渠道自动重置为第一个锚点模型 auto。"""
+    headers = {"Authorization": f"Bearer {test_server.api_token}"}
+
+    # 1. 尝试删除核心锚点 auto，必须被拒绝保护
+    status, _, body = _call_api(test_server.app, "DELETE", "/api/models/auto", headers=headers)
+    assert json.loads(body)["ok"] is False
+
+    # 2. 将 main 角色设置为 agnes-3.0-flash
+    test_server.cfg.setdefault("models", {}).setdefault("roles", {}).setdefault("main", {})["model"] = "agnes-3.0-flash"
+    test_server.cfg.setdefault("llm", {})["model"] = "agnes-3.0-flash"
+
+    # 3. 删除 agnes-3.0-flash
+    status, _, body = _call_api(test_server.app, "DELETE", "/api/models/agnes-3.0-flash", headers=headers)
+    assert status.startswith("200")
+    del_res = json.loads(body)
+    assert del_res["ok"] is True
+    assert del_res["deleted"] == "agnes-3.0-flash"
+    assert del_res["fallback_model"] == "auto"
+    assert "main" in del_res["reset_roles"]
+
+    # 4. 验证 main 角色与当前模型已回退至 auto
+    assert del_res["roles"]["main"]["model"] == "auto"
+    assert all(m["id"] != "agnes-3.0-flash" for m in del_res["models"])
 
 
 
+
+
+
+
+
+
+
+def test_adjust_endpoint_parameters_and_preserve_key(test_server, monkeypatch):
+    """验证接口参数调整功能：
+    1. 允许在留空 API Key 的情况下调整已有模型的参数（保持原密钥不被冲掉）；
+    2. 支持 target_role='none'（只更新接口参数与密钥，不强制切换主脑当前激活模型）；
+    3. 支持无鉴权/本地接口无需密钥保存。
+    """
+    headers = {"Authorization": f"Bearer {test_server.api_token}"}
+    monkeypatch.setenv("ALTEREGO_AGNES_API_KEY", "sk-mock-agnes-valid")
+
+    # 记录当前主模型
+    initial_main = test_server._model_name(test_server.llm)
+
+    # 1. 对已有 key 的内置模型调整参数（留空 api_key），且 target_role='none'
+    payload = {
+        "model_id": "agnes-3.0-flash",
+        "name": "Agnes 3.0 Flash (调优)",
+        "base_url": "https://apihub.agnes-ai.com/v1",
+        "api_key": "",
+        "target_role": "none",
+        "switch_active": False
+    }
+    status, _, body = _call_api(
+        test_server.app,
+        "POST",
+        "/api/settings/save_model_config",
+        headers=headers,
+        body=payload
+    )
+    assert status.startswith("200")
+    res = json.loads(body)
+    assert res["ok"] is True
+    # 主模型不应该被强制切换
+    assert test_server._model_name(test_server.llm) == initial_main
+
+    # 2. 保存本地无鉴权模型（no_key=True，api_key=''）
+    local_payload = {
+        "model_id": "custom-ollama-llama3",
+        "name": "本地 Llama3",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "api_key": "",
+        "no_key": True,
+        "target_role": "none"
+    }
+    status, _, body = _call_api(
+        test_server.app,
+        "POST",
+        "/api/settings/save_model_config",
+        headers=headers,
+        body=local_payload
+    )
+    assert status.startswith("200")
+    local_res = json.loads(body)
+    assert local_res["ok"] is True
+    assert any(m["id"] == "custom-ollama-llama3" for m in local_res["models"])
+
+
+def test_multi_level_fallback_chain_api_and_failover(test_server, monkeypatch):
+    """验证多级备用链配置 API 与级联自动降级（Failover Pipeline）：
+    1. 支持配置多个降级备用模型（如 顺位1: agnes-3.0-flash -> 顺位2: qwen3.8-omni-flash）；
+    2. API 保存后热重载为递归链式 LLMClient (primary -> fallback1 -> fallback2)；
+    3. 主模型与第 1 顺位均故障时，自动级联流转到第 2 顺位兜底模型成功返回。
+    """
+    headers = {"Authorization": f"Bearer {test_server.api_token}"}
+    monkeypatch.setenv("ALTEREGO_LLM_API_KEY", "sk-mock-primary")
+    monkeypatch.setenv("ALTEREGO_AGNES_API_KEY", "sk-mock-agnes")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-mock-dashscope")
+
+    # 1. 查询当前 fallback_chain
+    status, _, body = _call_api(test_server.app, "GET", "/api/settings/fallback_chain", headers=headers)
+    assert status.startswith("200")
+    assert json.loads(body)["ok"] is True
+
+    # 2. 配置 2 级备用链
+    multi_chain = ["agnes-3.0-flash", "qwen3.8-omni-flash"]
+    status, _, body = _call_api(
+        test_server.app,
+        "POST",
+        "/api/settings/fallback_chain",
+        headers=headers,
+        body={"chain": multi_chain}
+    )
+    assert status.startswith("200")
+    res = json.loads(body)
+    assert res["ok"] is True
+    assert len(res["chain"]) == 2
+    assert res["chain"][0]["model"] == "agnes-3.0-flash"
+    assert res["chain"][1]["model"] == "qwen3.8-omni-flash"
+
+    # 3. 验证主脑客户端已构建为递归链式 fallback
+    primary_client = test_server.llm
+    fb1_client = primary_client.fallback
+    assert fb1_client is not None, "未构建第 1 顺位 fallback"
+    assert fb1_client.model == "agnes-3.0-flash"
+
+    fb2_client = fb1_client.fallback
+    assert fb2_client is not None, "未构建第 2 顺位 fallback"
+    assert fb2_client.model == "qwen3.8-omni-flash"
+
+    # 4. 验证级联故障转移（Primary 失败 -> FB1 失败 -> FB2 成功）
+    from agent.llm import Message
+
+    def fail_call(*args, **kwargs):
+        raise RuntimeError("模拟上游接口 429 速率限制或网络超时")
+
+    def fb2_success_call(messages, *args, **kwargs):
+        return Message(role="assistant", content="来自第 2 顺位 Qwen 的降级回复")
+
+    monkeypatch.setattr(primary_client, "is_unconfigured", False)
+    monkeypatch.setattr(fb1_client, "is_unconfigured", False)
+    monkeypatch.setattr(primary_client.client.chat.completions, "create", fail_call)
+    monkeypatch.setattr(fb1_client.client.chat.completions, "create", fail_call)
+    monkeypatch.setattr(fb2_client, "chat", fb2_success_call)
+
+    reply = primary_client.chat([Message(role="user", content="测试多级容灾降级")])
+    assert reply.content == "来自第 2 顺位 Qwen 的降级回复"
+
+def test_behavior_settings_api_and_persistence(test_server, monkeypatch):
+    """验证行为配置（审批超时、危险动作默认粒度、托盘常驻、自动降级）接口与持久化。"""
+    headers = {"Authorization": f"Bearer {test_server.api_token}"} if getattr(test_server, "api_token", None) else {}
+
+    # 1. GET /api/settings 包含 behavior 字典
+    status, _, body = _call_api(test_server.app, "GET", "/api/settings", headers=headers)
+    assert status.startswith("200")
+    res = json.loads(body)
+    assert "behavior" in res
+    assert res["behavior"]["approval_timeout_sec"] >= 60
+    assert res["behavior"]["hazardous_default_scope"] in {"once", "session", "always"}
+
+    # 2. GET /api/settings/behavior
+    status, _, body = _call_api(test_server.app, "GET", "/api/settings/behavior", headers=headers)
+    assert status.startswith("200")
+    b_res = json.loads(body)
+    assert b_res["ok"] is True
+    assert "behavior" in b_res
+
+    # 3. POST /api/settings/behavior 修改参数
+    patch = {
+        "approval_timeout_sec": 600,
+        "hazardous_default_scope": "once",
+        "tray_resident": False,
+        "auto_failover": True,
+    }
+    status, _, body = _call_api(test_server.app, "POST", "/api/settings/behavior", headers=headers, body=patch)
+    assert status.startswith("200")
+    res_post = json.loads(body)
+    assert res_post["ok"] is True
+    assert res_post["behavior"]["approval_timeout_sec"] == 600
+    assert res_post["behavior"]["hazardous_default_scope"] == "once"
+    assert res_post["behavior"]["tray_resident"] is False
+
+    # 4. 验证 ApprovalManager 的 timeout_sec 立即热更新
+    assert test_server.approval.timeout_sec == 600
+
+    # 5. 验证持久化到 config.yaml
+    cfg_path = test_server.config_path
+    assert cfg_path.is_file()
+    import yaml
+    disk_data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert disk_data.get("behavior", {}).get("approval_timeout_sec") == 600
+    assert disk_data.get("behavior", {}).get("hazardous_default_scope") == "once"
+    assert disk_data.get("behavior", {}).get("tray_resident") is False
 

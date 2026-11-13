@@ -255,3 +255,53 @@ def test_repeated_append_checkpoints_have_linear_row_write_count(store):
         store.save_history(sid, history)
     assert store.db.total_changes - changes == 20
     assert durable_rows(store, sid)[:len(prefix)] == prefix
+
+
+def test_50_rounds_checkpoint_latency_and_truncation_reload(store):
+    import time
+    # Test algorithmic scaling and latency in memory (<10ms target)
+    mem_store = SessionStore(":memory:")
+    sid = mem_store.new_session("benchmark")
+    history = []
+    sample_img_bytes = b"sample_png_bytes_for_bench" * 8000
+    times = []
+
+    for i in range(50):
+        images = []
+        if i < 20:
+            images = [ImagePart(data=sample_img_bytes, mime="image/png")]
+        history.append(Message(role="user" if i % 2 == 0 else "assistant",
+                               content=f"step {i} message content",
+                               images=images,
+                               metadata={"step": i}))
+        t0 = time.perf_counter()
+        mem_store.save_history(sid, history)
+        t1 = time.perf_counter()
+        times.append((t1 - t0) * 1000.0)
+
+    times.sort()
+    p95 = times[int(len(times) * 0.95)]
+    # Roadmap requirement: 50 rounds, 20 screenshots checkpoint p95 < 10ms
+    assert p95 < 10.0, f"checkpoint p95 latency was {p95:.2f}ms"
+
+    # In-flight edit test
+    history[10].content = "edited in place content"
+    mem_store.save_history(sid, history)
+    loaded = mem_store.load_history(sid)
+    assert loaded[10].content == "edited in place content"
+
+    # In-flight truncation (compaction simulation)
+    history = history[:25]
+    mem_store.save_history(sid, history)
+    loaded_truncated = mem_store.load_history(sid)
+    assert len(loaded_truncated) == 25
+    assert [m.id for m in loaded_truncated] == [m.id for m in history]
+
+    # Disk store persistence test: verify identical behavior on disk
+    disk_sid = store.new_session("disk_bench")
+    store.save_history(disk_sid, history)
+    disk_loaded = store.load_history(disk_sid)
+    assert len(disk_loaded) == 25
+    assert disk_loaded[10].content == "edited in place content"
+
+

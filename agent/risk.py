@@ -6,7 +6,7 @@ import shlex
 
 
 _DAILY_TOOLS = frozenset({
-    "file_read", "web_search", "memory_search",
+    "file_read", "web_search", "memory_search", "skill_search",
     "desktop_list_items", "desktop_list_shortcuts", "desktop_list_windows",
     "desktop_snapshot", "desktop_inspect_focus", "desktop_screenshot",
     "desktop_show_desktop", "desktop_open_app", "desktop_open", "desktop_wait",
@@ -14,12 +14,13 @@ _DAILY_TOOLS = frozenset({
     "desktop_hover", "desktop_drag", "desktop_probe_app",
     "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_wait",
     "browser_evaluate", "browser_console", "browser_network_log",
-    "browser_inspect", "browser_resource",
+    "browser_inspect", "browser_resource", "browser_react_probe",
     "browser_wait_for", "browser_storage", "browser_press",
     "browser_handler", "browser_observe",
     "browser_upload", "browser_scroll", "browser_hover", "browser_select",
     "browser_find_text",
-    "browser_click", "browser_click_at", "browser_probe_at", "browser_type", "browser_fill_input", "browser_save_image", "browser_request_takeover",
+    "browser_click", "browser_click_at", "browser_probe_at", "browser_type", "browser_fill_input",
+    "browser_fill_combo", "browser_paste", "browser_save_image", "browser_request_takeover",
     # browser_click_at 与 browser_click 同级：普通点击动作，不弹审批卡
     "browser_new_tab", "browser_switch_tab", "browser_close_tab",
     # 浏览器录屏控制
@@ -30,7 +31,9 @@ _DAILY_TOOLS = frozenset({
     "browser_verify_code_countdown", "browser_lock_input", "browser_unlock_input",
     # 内部状态记账工具（钉死/核对关键值），无外部副作用，永不弹审批卡
     # v4 实测：state_pin 被定 L2→L3，用户被迫在微信上点两次通过，任务还疑似卡住
-    "state_pin", "state_check",
+    "state_pin", "state_check", "state_clear",
+    # 定时提醒只写本机任务库并弹系统通知，无外部副作用
+    "schedule_once",
 })
 _DANGEROUS_TOOLS = frozenset({
     "file_delete", "file_remove", "delete_file", "delete_directory", "delete_account",

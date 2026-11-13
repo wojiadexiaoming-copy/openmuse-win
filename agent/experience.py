@@ -5,9 +5,12 @@ MEMORY.md 里用户亲口说的 Facts/Preferences 是圣旨，不走这套。
 """
 from __future__ import annotations
 
+import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -24,6 +27,8 @@ class Experience:
 class ExperienceStore:
     def __init__(self, db_path: str):
         from agent.db import get_db
+        self._lock = threading.RLock()
+        self._archive_dir = Path(db_path).parent / "memory" / "bank" / "archive"
         self.db = get_db(db_path)
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS experience"
@@ -33,10 +38,11 @@ class ExperienceStore:
 
     def add(self, key: str, claim: str, confidence: float = 0.5):
         now = time.time()
-        self.db.execute(
-            "INSERT OR REPLACE INTO experience VALUES (?,?,?,?,?,?,?,0)",
-            (key, claim, confidence, now, now, 0, 0))
-        self.db.commit()
+        with self._lock:
+            self.db.execute(
+                "INSERT OR REPLACE INTO experience VALUES (?,?,?,?,?,?,?,0)",
+                (key, claim, confidence, now, now, 0, 0))
+            self.db.commit()
 
     def get(self, key: str) -> Experience | None:
         row = self.db.execute(
@@ -73,35 +79,35 @@ class ExperienceStore:
     def decay_job(self):
         """每夜 Job：90 天不用减半，180 天不用归档，被打脸 3 次归档。"""
         now = time.time()
-        for row in self.db.execute(
-                "SELECT ekey, confidence, last_used_ts, contradict_count"
-                " FROM experience WHERE archived=0").fetchall():
-            key, conf, last_used, contra = row
-            idle_days = (now - last_used) / 86400
-            if contra >= 3:
-                self._archive(key, "连续被新事实推翻 3 次")
-            elif idle_days > 180:
-                self._archive(key, "180天未用")
-            elif idle_days > 90:
-                self.db.execute(
-                    "UPDATE experience SET confidence=? WHERE ekey=?",
-                    (conf * 0.5, key))
-        self.db.commit()
+        with self._lock:
+            for row in self.db.execute(
+                    "SELECT ekey, confidence, last_used_ts, contradict_count"
+                    " FROM experience WHERE archived=0").fetchall():
+                key, conf, last_used, contra = row
+                idle_days = (now - last_used) / 86400
+                if contra >= 3:
+                    self._archive(key, "连续被新事实推翻 3 次")
+                elif idle_days > 180:
+                    self._archive(key, "180天未用")
+                elif idle_days > 90:
+                    self.db.execute(
+                        "UPDATE experience SET confidence=? WHERE ekey=?",
+                        (conf * 0.5, key))
+            self.db.commit()
 
     def _archive(self, key: str, reason: str):
-        self.db.execute("UPDATE experience SET archived=1 WHERE ekey=?", (key,))
-        self.db.commit()
+        with self._lock:
+            self.db.execute("UPDATE experience SET archived=1 WHERE ekey=?", (key,))
+            self.db.commit()
         try:
-            from pathlib import Path
-            archive_dir = Path("memory/bank/archive")
-            archive_dir.mkdir(parents=True, exist_ok=True)
+            self._archive_dir.mkdir(parents=True, exist_ok=True)
             safe_key = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in key)
             record = {
                 "key": key,
                 "reason": reason,
                 "archived_at": time.time(),
             }
-            (archive_dir / f"{safe_key}.json").write_text(
+            (self._archive_dir / f"{safe_key}.json").write_text(
                 json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
             )
         except Exception:

@@ -9,6 +9,7 @@ const API = (window.location.origin && window.location.origin !== "null" && !win
 const params = new URLSearchParams(location.search);
 const TASK_ID = params.get("task_id") || "demo";
 const TARGET = params.get("target") || "Chrome";
+const TOKEN = params.get("token") || "";
 
 const titleEl = document.getElementById("takeover-title");
 const timerEl = document.getElementById("takeover-timer");
@@ -36,8 +37,13 @@ async function finish(kind) {
   const path = kind === "done"
     ? `/api/takeover/${TASK_ID}/done`
     : `/api/takeover/${TASK_ID}/cancel`;
+  const headers = { "Content-Type": "application/json" };
+  if (TOKEN) headers["X-AlterEgo-Token"] = TOKEN;
   try {
-    await fetch(API + path, { method: "POST" });
+    const res = await fetch(API + path, { method: "POST", headers });
+    if (res.status === 401) {
+      console.warn("takeover 401: token invalid or missing, please operate in main window");
+    }
   } catch (e) {
     // 后端连不上也照关窗口，不卡死用户（fail safe）
     console.warn("takeover api unreachable:", e.message);
@@ -57,7 +63,10 @@ async function finish(kind) {
 setInterval(async () => {
   if (finished) return;
   try {
-    const r = await fetch(`${API}/api/takeover/${TASK_ID}/status`);
+    const headers = {};
+    if (TOKEN) headers["X-AlterEgo-Token"] = TOKEN;
+    const r = await fetch(`${API}/api/takeover/${TASK_ID}/status`, { headers });
+    if (r.status === 401) return;
     const s = await r.json();
     if (s.status !== "active") finish(s.status === "completed" ? "done" : "cancel");
   } catch (e) { /* 后端未启动时静默，纯演示 */ }

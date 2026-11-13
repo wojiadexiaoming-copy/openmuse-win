@@ -72,18 +72,30 @@ class _MigrationFileLock:
         self._fd = None
 
     def __enter__(self):
-        try:
-            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            self._fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR)
-            if sys.platform == "win32":
-                import msvcrt
-                msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except Exception:
-            time.sleep(0.3)
-        return self
+        # SEC-11：获取失败必须重试后放弃，严禁无锁继续执行迁移。
+        # 旧实现失败仅 sleep 0.3s 后照常返回 self，EDGE-06 想防的并发竞态防不住。
+        last_exc = None
+        for _ in range(10):  # 共 ~3s
+            try:
+                self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+                self._fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR)
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except Exception as exc:
+                last_exc = exc
+                if self._fd is not None:
+                    try:
+                        os.close(self._fd)
+                    except Exception:
+                        pass
+                    self._fd = None
+                time.sleep(0.3)
+        raise TimeoutError(f"Vault 迁移锁获取超时（其他实例持有中）: {self.lock_path}") from last_exc
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._fd is not None:
@@ -113,8 +125,13 @@ def _migrate_legacy_vault(legacy: Path, scoped: Path, move: bool = False) -> Non
     """
     if not legacy.is_dir():
         return
-    with _MigrationFileLock(scoped / ".migration.lock"):
-        _do_migrate_legacy_vault(legacy, scoped, move=move)
+    try:
+        with _MigrationFileLock(scoped / ".migration.lock"):
+            _do_migrate_legacy_vault(legacy, scoped, move=move)
+    except TimeoutError as exc:
+        # 迁移是锦上添花：锁被其他实例持有时跳过本轮，缺失的密钥仍可由
+        # _try_import_key_from_candidates 动态补全，不阻塞启动。
+        logger.warning("[Vault] 跳过本轮密钥迁移（迁移锁被其他实例占用）: %s", exc)
 
 
 def _do_migrate_legacy_vault(legacy: Path, scoped: Path, move: bool = False) -> None:
@@ -389,8 +406,13 @@ class Vault:
         text = re.sub(r"\bgh[pousr]_[\w]{20,}", "[REDACTED]", text)
         text = re.sub(r"\bsk-[\w\-]{16,}", "[REDACTED]", text)
         text = re.sub(r"\bnvapi-[\w\-]{16,}", "[REDACTED]", text)
+        text = re.sub(r"\bms-[a-zA-Z0-9\-]{20,}", "[REDACTED]", text)
         text = re.sub(r"\bAIza[0-9A-Za-z\-_]{20,}", "[REDACTED]", text)
+        text = re.sub(r"\bAQ\.[A-Za-z0-9\-_]{20,}", "[REDACTED]", text)
         text = re.sub(r"\bcfat_[\w\-]{16,}", "[REDACTED]", text)
+        # 智谱 BigModel：{32位hex id}.{16位secret} 形状（SEC-12，此前发布脚本
+        # 被迫硬编码真实 key 前缀堵洞，正是本缺口的反证）
+        text = re.sub(r"\b[0-9a-f]{32}\.[A-Za-z0-9]{16}\b", "[REDACTED]", text)
         return text
 
     @_vault_locked
