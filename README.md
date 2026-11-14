@@ -1,9 +1,8 @@
-# OpenMuse-Win (AlterEgo)
+# AlterEgo
 
 Windows 原生单机个人 AI Agent。0→1 自研编排层，不基于 LangChain / AutoGen / CrewAI 等整套框架。
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23446166.svg)](https://doi.org/10.5281/zenodo.23446166)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
 > **论文正式发布**：
 > 《**AlterEgo: Towards the Zero-Cost Personal Agent**》  
@@ -11,11 +10,9 @@ Windows 原生单机个人 AI Agent。0→1 自研编排层，不基于 LangChai
 > - **Zenodo 页面**: [https://zenodo.org/records/23446166](https://zenodo.org/records/23446166)  
 > - **公开开源仓库**: [https://github.com/wojiadexiaoming-copy/openmuse-win](https://github.com/wojiadexiaoming-copy/openmuse-win)
 > 
-> 🏆 **BoHack 2026 评审核验指引（42小时冲刺成果）**：  
-> 本项目带 1.0 开源基线 (`openmuse-win`) 参赛。在活动期间 **42 小时冲刺** 内，累计完成 **+273 个新增文件**、**+41,869 行新增代码**，重点攻坚多进程硬隔离、复杂 SPA 浏览器原生事件链、微信移动端双向审批与全新桌面高保真工作台重构。  
-> - 📄 完整对照报告：[**《🏆 BoHack 2026 42小时技术增量与基线对照报告》**](docs/🏆%20BoHack%202026%2042小时技术增量与基线对照报告.md) / [ASCII 镜像](docs/BoHack_2026_42h_Increment_Report.md)  
-> - 📝 详细更新日志：[**CHANGELOG.md**](CHANGELOG.md)  
-> - 🌿 对应发布分支：[`v1.1-20261114`](https://github.com/wojiadexiaoming-copy/openmuse-win/tree/v1.1-20261114)
+> 🏆 **BoHack 2026 评审核验指引**：  
+> 本项目带 1.0 开源基线 (`openmuse-win`) 参赛。在活动期间 **42 小时冲刺** 内，累计完成 **+273 个新增文件**、**+41,869 行新增代码**，重点攻坚多进程硬隔离、复杂 SPA 浏览器原生事件链、微信移动端双向审批、多云商业算力协同（联通云 Token Plan + 阿里百炼集群）、403免费配额耗尽零延迟自愈降级与全新桌面高保真工作台重构。完整证据链与文件级 Diff 详见：  
+> 👉 [**《🏆 BoHack 2026 42小时技术增量与基线对照报告》**](docs/🏆%20BoHack%202026%2042小时技术增量与基线对照报告.md)
 
 > 许可状态：AGPL-3.0 + 商业许可（双许可），**最终条款待律师审核**，见 `LICENSE_STATUS.md`。
 

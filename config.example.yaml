@@ -118,10 +118,3 @@ retention:
   log_days: 14            # 日志保留天数
   span_days: 14           # 追踪数据保留天数
 
-
-# 行为偏好与运行时安全防护配置
-behavior:
-  approval_timeout_sec: 180      # 审批超时时间（秒，默认 3 分钟 fail-closed 自动拒绝）
-  hazardous_default_scope: "session"  # 危险动作默认授权粒度 (session: 本会话, once: 仅本次, always: 始终允许)
-  tray_resident: true            # 托盘常驻：关闭窗口后继续在后台执行任务
-  auto_failover: true            # 模型调用失败自动按备用链降级

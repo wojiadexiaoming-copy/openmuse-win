@@ -10,11 +10,12 @@ from agent.tools_registry import ToolDefinition
 
 # 白名单：只允许这些命令的 argv[0]。Windows 下同样适用（where/python/pip 等）。
 ALLOWED = {
-    "python", "python3", "pip", "pip3",
+    "python", "python3", "pip", "pip3", "pytest", "uv", "uvx",
     "git", "node", "npm",
-    "dir", "echo", "type", "where", "set",
+    "dir", "echo", "type", "where", "set", "ver",
     "ls", "cat", "pwd", "which", "env",
-    "tasklist", "findstr", "start", "whoami", "curl", "hostname",
+    "tasklist", "taskkill", "findstr", "start", "whoami", "curl", "hostname",
+    "ping", "ipconfig", "netstat", "systeminfo", "explorer",
 }
 
 # 危险模式：参数里出现直接拒绝（防 rm -rf /、格式化磁盘、探测本地私有调试端口等）
@@ -133,7 +134,7 @@ def _run(args: dict) -> str:
     argv = shlex.split(command, posix=posix_mode)
 
     is_win = sys.platform == "win32"
-    WIN_CMD_BUILTINS = {"dir", "echo", "type", "set", "start"}
+    WIN_CMD_BUILTINS = {"dir", "echo", "type", "set", "start", "ver"}
     cmd_to_run = argv
     if is_win and argv[0].lower() in WIN_CMD_BUILTINS:
         cmd_to_run = ["cmd", "/d", "/s", "/c", *argv]

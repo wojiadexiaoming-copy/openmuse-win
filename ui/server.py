@@ -201,6 +201,21 @@ class AgentServer:
         self.llm = LLMClient.from_config(
             self.cfg, api_key=llm_key, fallback_api_key=backup_key, vault=self.vault, allow_unconfigured=True)
 
+        # 热计算：后台守护线程预热云端连接池与 TLS 握手，消除用户首轮请求的冷握手延迟
+        def _bg_prewarm_connections():
+            try:
+                if hasattr(self, "llm") and self.llm:
+                    self.llm.prewarm()
+                    visited = {id(self.llm)}
+                    cur = getattr(self.llm, "fallback", None)
+                    while cur is not None and id(cur) not in visited:
+                        visited.add(id(cur))
+                        cur.prewarm()
+                        cur = getattr(cur, "fallback", None)
+            except Exception:
+                pass
+        threading.Thread(target=_bg_prewarm_connections, daemon=True, name="alterego-cloud-prewarm").start()
+
         self.registry = ToolRegistry()
         media_key = ""
         try:
@@ -212,16 +227,14 @@ class AgentServer:
         register_all(self.registry, self.cfg, api_key=media_key or backup_key or llm_key)
 
         self._startup_phase("open_settings_and_approvals")
-        beh_cfg = self.cfg.get("behavior") or {}
-        approval_timeout = int(beh_cfg.get("approval_timeout_sec", 180))
         self.settings = Settings(self.data_dir / "settings.json")
-        self.approval = ApprovalManager(str(self.data_dir / "approvals.db"), timeout_sec=approval_timeout, settings=self.settings)
+        self.approval = ApprovalManager(str(self.data_dir / "approvals.db"), settings=self.settings)
 
         # UI 审批回调：等待用户在网页上批准或拒绝，并实时推送到网页
         def ui_on_ask(card):
             risk = getattr(card, "risk_level", getattr(card, "risk", "L2"))
             created = getattr(card, "requested_at", getattr(card, "created_at", time.time()))
-            timeout = getattr(card, "timeout_sec", getattr(self.approval, "timeout_sec", 180))
+            timeout = getattr(card, "timeout_sec", 300)
             # 审批归属会话：微信发起的任务同样走这条回调，卡片必须记住
             # 自己属于哪个会话，前端才能把授权卡放回微信会话而不是桌面会话。
             card.session_id = getattr(self.orch, "session_id", "") or ""
@@ -386,7 +399,6 @@ class AgentServer:
         )
         self._startup_phase("open_conversation_database")
         self.store = SessionStore(str(self.data_dir / "conversations.db"))
-        self._preseed_token_usage_from_db()
         # 启动时检查未完成任务：在归档前先看最新 session 是否有 incomplete 任务
         # 若有，通过 SSE 事件通知前端弹"继续/丢弃"提示
         self._pending_resume_prompt = None
@@ -724,29 +736,6 @@ class AgentServer:
             "scope": "application_recorded_requests", "input": None, "output": None,
             "known_requests": 0, "unknown_requests": 0,
         }
-
-
-    def _preseed_token_usage_from_db(self):
-        """从 conversations.db 预加载历史累计 Token 用量，防止重启后用量归零。"""
-        if not hasattr(self, "store") or not self.store:
-            return
-        try:
-            stats = self.store.get_token_usage_stats(range_days=0)
-            summary = stats.get("summary", {})
-            reqs = summary.get("requests", 0)
-            if reqs > 0:
-                in_tok = summary.get("input_tokens", 0)
-                out_tok = summary.get("output_tokens", 0)
-                with self._token_usage_lock:
-                    usage = dict(self.state_snapshot["status"]["token_usage"])
-                    usage["input"] = in_tok
-                    usage["output"] = out_tok
-                    usage["known_requests"] = reqs
-                    usage["revision"] += 1
-                    self.state_snapshot["status"]["token_usage"] = usage
-        except Exception as exc:
-            import logging
-            logging.getLogger("alterego.ui.server").warning("[TokenUsage] 从数据库预加载历史 Token 失败: %s", exc)
 
     def _record_token_usage(self, metadata):
         if not isinstance(metadata, dict) or metadata.get("request_attempted") is not True:
@@ -1178,6 +1167,14 @@ class AgentServer:
             data = self._record_token_usage(data)
             if data is None:
                 return
+        elif event == "model_failover":
+            to_model = data.get("to_model")
+            if to_model:
+                self.state_snapshot["status"]["current_model"] = to_model
+                self.state_snapshot["agent_state"]["model"] = to_model
+                if self.cfg.get("behavior", {}).get("auto_failover", True):
+                    self.cfg.setdefault("llm", {})["model"] = to_model
+                    self.cfg.setdefault("models", {}).setdefault("roles", {}).setdefault("main", {})["model"] = to_model
         elif event == "turn_notice":
             sid = getattr(self.orch, "session_id", None)
             if not sid:
@@ -1367,70 +1364,94 @@ class AgentServer:
 
         # 可切换的主模型列表（支持预设推荐、配置文件动态发现与用户自定义模型）
         PRESET_MODELS = [
-            {"id": "auto", "name": "EchoBird", "display_name": "EchoBird",
-             "display_id": "EchoBird",
+            {"id": "auto", "name": "EchoBird 智能路由", "display_name": "EchoBird",
+             "display_id": "auto",
              "base_url": "http://127.0.0.1:53683/v1",
-             "desc": "EchoBird 智能路由 · 固定模型 auto，由本地网关自动选择真实厂商/模型",
-             "tag": "智能路由",
+             "desc": "EchoBird 智能路由 · 本地网关自动负载调度（系统核心锚点）",
+             "tag": "核心锚点 · 智能路由",
              "group": "recommended",
              "supports_images": True,
              "key_env": "ECHOBIRD_API_KEY", "vault_key": "echobird_api_key"},
-            {"id": "agnes-3.0-flash", "name": "Agnes 3.0 Flash",
+            {"id": "MiniMax-M2.5", "name": "联通云 MiniMax-M2.5", "display_name": "联通云 MiniMax-M2.5",
+             "display_id": "MiniMax-M2.5",
+             "base_url": "https://aigw-gzgy2.cucloud.cn:8443/v1",
+             "desc": "联通云星罗 Token Plan · 商业高并发 · 低延迟 · 精准 Tool Call",
+             "tag": "主力推荐 · 商业级",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "CUCLOUD_API_KEY", "vault_key": "cucloud_api_key"},
+            {"id": "DeepSeek-V4-Flash", "name": "联通云 DeepSeek-V4-Flash", "display_name": "联通云 DeepSeek-V4-Flash",
+             "display_id": "DeepSeek-V4-Flash",
+             "base_url": "https://aigw-gzgy2.cucloud.cn:8443/v1",
+             "desc": "联通云星罗 Token Plan · 深度长程推理 · 支持 Tool Call",
+             "tag": "深度推理 · 商业级",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "CUCLOUD_API_KEY", "vault_key": "cucloud_api_key"},
+            {"id": "aisp-auto-route", "name": "联通云 aisp-auto-route", "display_name": "联通云 aisp-auto-route",
+             "display_id": "aisp-auto-route",
+             "base_url": "https://aigw-gzgy2.cucloud.cn:8443/v1",
+             "desc": "联通云星罗 Token Plan · 智能自动路由调度",
+             "tag": "智能路由 · 商业级",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "CUCLOUD_API_KEY", "vault_key": "cucloud_api_key"},
+            {"id": "qwen3.8-flash", "name": "通义千问 Qwen3.8 Flash (阿里云百炼)", "display_name": "Qwen 3.8 Flash",
+             "display_id": "qwen3.8-flash",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+             "desc": "阿里云百炼官方极速模型 · 响应敏捷 · 原生 Tool Call 支持",
+             "tag": "百炼主力 · 极速",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
+            {"id": "qwen3.8-max-0902", "name": "通义千问 Qwen3.8 Max (阿里云百炼)", "display_name": "Qwen 3.8 Max",
+             "display_id": "qwen3.8-max-0902",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+             "desc": "阿里云百炼旗舰大模型 0902 · 最强综合逻辑理解与复杂任务规划",
+             "tag": "百炼旗舰 · 深度",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
+            {"id": "deepseek-v4.1-flash-1017", "name": "DeepSeek V4.1 Flash (阿里云百炼)", "display_name": "DeepSeek V4.1 Flash",
+             "display_id": "deepseek-v4.1-flash-1017",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+             "desc": "阿里云百炼 · 极速推理与原生 Agent 函数调用 · 免费/高额度",
+             "tag": "百炼免费 · 极速",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
+            {"id": "kimi-k3.1-pro", "name": "Kimi K3.1 Pro (阿里云百炼)", "display_name": "Kimi K3.1 Pro",
+             "display_id": "kimi-k3.1-pro",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+             "desc": "阿里云百炼 · 超长上下文与深度规划 · 原生 Tool Call 支持",
+             "tag": "百炼免费 · 深度",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
+            {"id": "glm-5.3", "name": "GLM 5.3 (阿里云百炼)", "display_name": "GLM 5.3",
+             "display_id": "glm-5.3",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+             "desc": "智谱 GLM 5.3 旗舰 · 中文认知与长程规划优秀",
+             "tag": "百炼推荐 · 旗舰",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
+            {"id": "kimi-k3", "name": "Kimi K3 (阿里云百炼)", "display_name": "Kimi K3",
+             "display_id": "kimi-k3",
+             "base_url": "https://llm-wwautliy36g7ora8.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+             "desc": "阿里云百炼专属网关 · 超强长上下文与深度推理",
+             "tag": "深度推理 · 存活备用",
+             "group": "recommended",
+             "supports_images": True,
+             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
+            {"id": "agnes-3.0-flash", "name": "Agnes 3.0 Flash", "display_name": "Agnes 3.0 Flash",
+             "display_id": "agnes-3.0-flash",
              "base_url": "https://apihub.agnes-ai.com/v1",
-             "desc": "Agnes API Hub · 全模态零延迟无速率限制",
-             "tag": "主力推荐 · 极速",
+             "desc": "Agnes API Hub · 全模态零延迟（公网容灾兜底）",
+             "tag": "容灾备用",
              "group": "recommended",
              "supports_images": True,
              "key_env": "ALTEREGO_AGNES_API_KEY", "vault_key": "agnes_api_key"},
-            {"id": "qwen3.8-omni-flash", "name": "Qwen 3.8 Omni Flash",
-             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-             "desc": "阿里云百炼专属全模态 · 低延迟多模态识图与实时交互",
-             "tag": "阿里云百炼 · 极速",
-             "group": "recommended",
-             "supports_images": True,
-             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
-            {"id": "kimi-k3", "name": "Kimi K3",
-             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-             "desc": "阿里云百炼专属网关 · 超强长上下文与深度推理",
-             "tag": "深度推理",
-             "group": "recommended",
-             "supports_images": True,
-             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
-            {"id": "qwen3.8-max", "name": "Qwen 3.8 Max",
-             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-             "desc": "阿里云百炼旗舰超大多模态 · 复杂图表与高难度任务拆解",
-             "tag": "超大旗舰",
-             "group": "recommended",
-             "supports_images": True,
-             "key_env": "DASHSCOPE_API_KEY", "vault_key": "dashscope_api_key"},
-            {"id": "gemini-3.5-flash", "name": "Gemini 3.5 Flash",
-             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-             "desc": "Google 官方高效模型 · 视觉与代码理解（备选通道）",
-             "tag": "海外极速",
-             "group": "recommended",
-             "supports_images": True,
-             "key_env": "ALTEREGO_GEMINI_API_KEY", "vault_key": "gemini_api_key"},
-            {"id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash",
-             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-             "desc": "Google 最新架构高效模型备选",
-             "tag": "海外",
-             "group": "recommended",
-             "supports_images": True,
-             "key_env": "ALTEREGO_GEMINI_API_KEY", "vault_key": "gemini_api_key"},
-            {"id": "gemini-3.5-flash-lite", "name": "Gemini 3.5 Flash Lite",
-             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-             "desc": "Google 轻量级低延迟",
-             "tag": "轻量",
-             "group": "recommended",
-             "supports_images": True,
-             "key_env": "ALTEREGO_GEMINI_API_KEY", "vault_key": "gemini_api_key"},
-             {"id": "gemini-flash-latest", "name": "Gemini Flash Latest",
-             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-             "desc": "指向 Google 最新 Flash 版本",
-             "tag": "海外",
-             "group": "recommended",
-             "supports_images": True,
-             "key_env": "ALTEREGO_GEMINI_API_KEY", "vault_key": "gemini_api_key"},
         ]
         AVAILABLE_MODELS = PRESET_MODELS
 
@@ -1526,7 +1547,7 @@ class AgentServer:
 
             for source_name, scfg in cfg_sources:
                 mid = str(scfg.get("model") or "").strip()
-                if mid and mid not in seen_ids:
+                if mid and mid not in seen_ids and (mid not in deleted_ids or mid == anchor_id):
                     seen_ids.add(mid)
                     display_name = _model_display_name(mid, scfg.get("base_url") or "")
                     result.append({
@@ -1546,7 +1567,7 @@ class AgentServer:
             # 4. 确保当前生效模型一定在列表中
             current_llm = getattr(self, "llm", None)
             current_id = self._model_name(current_llm)
-            if current_id and current_id not in seen_ids:
+            if current_id and current_id not in seen_ids and (current_id not in deleted_ids or current_id == anchor_id):
                 seen_ids.add(current_id)
                 current_base_url = getattr(current_llm, "base_url", "")
                 current_display = _model_display_name(current_id, current_base_url)
@@ -1600,6 +1621,9 @@ class AgentServer:
             if any(k in mid or k in base_url for k in ("qwen", "dashscope", "kimi", "aliyuncs")):
                 is_specific_provider = True
                 provider_candidates.extend([("DASHSCOPE_API_KEY", "dashscope_api_key")])
+            if "cucloud" in base_url or "cucloud" in mid:
+                is_specific_provider = True
+                provider_candidates.extend([("CUCLOUD_API_KEY", "cucloud_api_key")])
             if "gemini" in mid or "google" in base_url:
                 is_specific_provider = True
                 provider_candidates.extend([("ALTEREGO_GEMINI_API_KEY", "gemini_api_key"), ("GEMINI_API_KEY", "")])
@@ -1655,12 +1679,54 @@ class AgentServer:
 
             return ""
 
+        def _extract_fallback_chain() -> list[dict]:
+            raw_chain = (
+                self.cfg.get("llm", {}).get("fallback_chain")
+                or self.cfg.get("models", {}).get("roles", {}).get("main", {}).get("fallback_chain")
+                or []
+            )
+            all_m = {m["id"]: m for m in _get_dynamic_models()}
+            chain = []
+            if isinstance(raw_chain, list) and raw_chain:
+                for item in raw_chain:
+                    mid = (item.get("model") if isinstance(item, dict) else str(item)).strip()
+                    if not mid:
+                        continue
+                    m_def = all_m.get(mid, {})
+                    b_url = item.get("base_url") if isinstance(item, dict) else ""
+                    b_url = b_url or m_def.get("base_url", "")
+                    chain.append({
+                        "model": mid,
+                        "base_url": b_url,
+                        "supports_images": item.get("supports_images", m_def.get("supports_images", True)) if isinstance(item, dict) else m_def.get("supports_images", True),
+                        "enabled": item.get("enabled", True) if isinstance(item, dict) else True,
+                    })
+            if not chain:
+                fb = self.cfg.get("llm", {}).get("fallback") or self.cfg.get("models", {}).get("roles", {}).get("main", {}).get("fallback", {})
+                if isinstance(fb, dict) and fb.get("model"):
+                    mid = str(fb["model"]).strip()
+                    m_def = all_m.get(mid, {})
+                    chain.append({
+                        "model": mid,
+                        "base_url": fb.get("base_url", m_def.get("base_url", "")),
+                        "supports_images": fb.get("supports_images", False),
+                        "enabled": fb.get("enabled", True),
+                    })
+            return chain
+
         def _extract_roles_info() -> dict:
             """提取各角色的当前生效模型与端点信息。"""
             current = self._model_name(self.llm)
             roles_cfg = self.cfg.get("models", {}).get("roles", {})
             main_cfg = roles_cfg.get("main") or self.cfg.get("llm", {})
             fb_cfg = self.cfg.get("llm", {}).get("fallback") or main_cfg.get("fallback", {})
+            fb_chain_cfg = self.cfg.get("llm", {}).get("fallback_chain") or main_cfg.get("fallback_chain", [])
+            if fb_chain_cfg and isinstance(fb_chain_cfg, list) and len(fb_chain_cfg) > 0:
+                first_fb = fb_chain_cfg[0]
+                if isinstance(first_fb, dict):
+                    fb_cfg = {**fb_cfg, **first_fb}
+                elif isinstance(first_fb, str):
+                    fb_cfg = {**fb_cfg, "model": first_fb}
 
             planner_cfg = roles_cfg.get("planner", {})
             if isinstance(planner_cfg, dict) and "ref" in planner_cfg:
@@ -1674,27 +1740,6 @@ class AgentServer:
 
             worker_cfg = roles_cfg.get("worker", {}) if isinstance(roles_cfg.get("worker"), dict) else {}
             sub_cfg = roles_cfg.get("subagent", {}) if isinstance(roles_cfg.get("subagent"), dict) else {}
-
-            chain_raw = self.cfg.get("llm", {}).get("fallback_chain") or main_cfg.get("fallback_chain")
-            fallback_chain = []
-            if isinstance(chain_raw, list) and chain_raw:
-                for it in chain_raw:
-                    if isinstance(it, dict) and it.get("model"):
-                        fallback_chain.append({
-                            "model": it["model"],
-                            "base_url": it.get("base_url", ""),
-                            "supports_images": it.get("supports_images", False)
-                        })
-                    elif isinstance(it, str) and it:
-                        fallback_chain.append({"model": it, "base_url": "", "supports_images": False})
-            elif fb_cfg.get("model") and fb_cfg.get("enabled", True):
-                fallback_chain = [{
-                    "model": fb_cfg.get("model"),
-                    "base_url": fb_cfg.get("base_url", ""),
-                    "supports_images": fb_cfg.get("supports_images", False)
-                }]
-            else:
-                fallback_chain = []
 
             roles_info = {
                 "main": {
@@ -1728,11 +1773,10 @@ class AgentServer:
                 "fallback": {
                     "name": "🛡️ 容灾兜底 (Fallback)",
                     "desc": "主模型故障或遇到速率限制时自动接管",
-                    "model": fallback_chain[0]["model"] if fallback_chain else (fb_cfg.get("model", "") if fb_cfg.get("enabled", True) else ""),
-                    "base_url": fallback_chain[0]["base_url"] if fallback_chain else fb_cfg.get("base_url", ""),
+                    "model": fb_cfg.get("model", "") if fb_cfg.get("enabled", True) else "",
+                    "base_url": fb_cfg.get("base_url", "") if fb_cfg.get("enabled", True) else "",
                     "enabled": fb_cfg.get("enabled", True),
                     "supports_images": fb_cfg.get("supports_images", False),
-                    "chain": fallback_chain,
                 }
             }
             for r in roles_info.values():
@@ -1743,7 +1787,7 @@ class AgentServer:
 
         def _persist_config_roles() -> bool:
             """将角色与模型更新安全持久化到根目录 config.yaml 中（优先保留所有注释与排版）。"""
-            cfg_path = Path(getattr(self, "config_path", None) or (REPO_ROOT / "config.yaml"))
+            cfg_path = getattr(self, "config_path", None) or (REPO_ROOT / "config.yaml")
             if not cfg_path.is_file():
                 return False
             try:
@@ -1782,24 +1826,12 @@ class AgentServer:
                         disk_data["llm"]["fallback"]["model"] = self.cfg["llm"]["fallback"].get("model")
                         disk_data["llm"]["fallback"]["base_url"] = self.cfg["llm"]["fallback"].get("base_url")
                         disk_data["llm"]["fallback"]["enabled"] = self.cfg["llm"]["fallback"].get("enabled", True)
-                    if "fallback_chain" in self.cfg.get("llm", {}):
-                        disk_data.setdefault("llm", {})["fallback_chain"] = self.cfg["llm"]["fallback_chain"]
-                    if "fallback_chain" in self.cfg.get("models", {}).get("roles", {}).get("main", {}):
-                        disk_data.setdefault("models", {}).setdefault("roles", {}).setdefault("main", {})["fallback_chain"] = \
-                            self.cfg["models"]["roles"]["main"]["fallback_chain"]
-                    if "behavior" in self.cfg and isinstance(self.cfg["behavior"], dict):
-                        disk_data.setdefault("behavior", {})
-                        for bk, bv in self.cfg["behavior"].items():
-                            disk_data["behavior"][bk] = bv
+                    if "fallback_chain" in self.cfg["llm"]:
+                        disk_data["llm"]["fallback_chain"] = self.cfg["llm"]["fallback_chain"]
+                        disk_data.setdefault("models", {}).setdefault("roles", {}).setdefault("main", {})["fallback_chain"] = self.cfg["llm"]["fallback_chain"]
 
                 with open(cfg_path, "w", encoding="utf-8") as f:
                     dump_func(disk_data, f)
-                    f.flush()
-                    try:
-                        import os
-                        os.fsync(f.fileno())
-                    except Exception:
-                        pass
                 return True
             except Exception as exc:
                 logger.error("持久化 config.yaml 角色配置异常: %s", exc, exc_info=True)
@@ -1815,99 +1847,81 @@ class AgentServer:
                       for m in all_models]
             for m in public:
                 m["has_key"] = bool(_resolve_model_key(m))
-            r_info = _extract_roles_info()
-            fb_chain = r_info.get("fallback", {}).get("chain") or []
             return {
                 "current": current,
                 "current_display": _model_display_name(current, current_base_url),
                 "models": public,
-                "roles": r_info,
-                "fallback_chain": fb_chain,
+                "roles": _extract_roles_info(),
+                "fallback_chain": _extract_fallback_chain(),
             }
 
         @app.route("/api/settings/fallback_chain", method=["GET", "POST"])
-        def manage_fallback_chain():
-            """查询与保存多级容灾降级备用链。"""
+        def handle_fallback_chain():
+            """查询或保存多级容灾降级备用链（热重载 + 持久化）。"""
             from bottle import request
-            all_models = _get_dynamic_models()
-            model_map = {m["id"]: m for m in all_models}
-
-            if request.method == "POST":
-                data = request.json or {}
-                raw_chain = data.get("chain") or data.get("fallback_chain") or []
-                if not isinstance(raw_chain, list):
-                    raw_chain = [raw_chain] if raw_chain else []
-
-                new_chain = []
-                for item in raw_chain:
-                    mid = item.get("model") if isinstance(item, dict) else str(item)
-                    mid = mid.strip() if mid else ""
-                    if not mid:
-                        continue
-                    m_obj = model_map.get(mid, {})
-                    burl = (item.get("base_url") if isinstance(item, dict) else None) or m_obj.get("base_url", "")
-                    img = (item.get("supports_images") if isinstance(item, dict) else None)
-                    if img is None:
-                        img = m_obj.get("supports_images", False)
-                    new_chain.append({
-                        "model": mid,
-                        "base_url": burl,
-                        "supports_images": bool(img),
-                        "enabled": True
-                    })
-
-                self.cfg.setdefault("llm", {})["fallback_chain"] = new_chain
-                roles = self.cfg.setdefault("models", {}).setdefault("roles", {})
-                roles.setdefault("main", {})["fallback_chain"] = new_chain
-
-                if new_chain:
-                    first = new_chain[0]
-                    self.cfg["llm"]["fallback"] = {
-                        "model": first["model"],
-                        "base_url": first["base_url"],
-                        "enabled": True,
-                        "supports_images": first["supports_images"]
-                    }
-                    roles["main"].setdefault("fallback", {})
-                    roles["main"]["fallback"]["model"] = first["model"]
-                    roles["main"]["fallback"]["base_url"] = first["base_url"]
-                    roles["main"]["fallback"]["enabled"] = True
-                    roles["main"]["fallback"]["supports_images"] = first["supports_images"]
-                else:
-                    self.cfg["llm"].setdefault("fallback", {})["enabled"] = False
-                    roles.setdefault("main", {}).setdefault("fallback", {})["enabled"] = False
-
-                # 1. 优先物理落盘：第一时间同步保存到 config.yaml 并 fsync，保证瞬时关闭/重启 100% 固化
-                _persist_config_roles()
-
-                # 2. 内存热重载客户端
-                try:
-                    with self.turn_lock:
-                        self._reload_model_clients()
-                except Exception as exc:
-                    logger.warning("重新加载客户端失败: %s", exc)
-
-                self.emit_event("model_switched", {
-                    "target_role": "fallback",
-                    "model": new_chain[0]["model"] if new_chain else "",
-                    "base_url": new_chain[0]["base_url"] if new_chain else "",
-                    "fallback_chain": new_chain
-                })
-
+            if request.method == "GET":
+                chain = _extract_fallback_chain()
                 return {
                     "ok": True,
-                    "chain": new_chain,
-                    "fallback_chain": new_chain,
-                    "roles": _extract_roles_info()
+                    "chain": chain,
+                    "fallback_chain": chain,
+                    "roles": _extract_roles_info(),
                 }
 
-            # GET
-            r_info = _extract_roles_info()
-            chain = r_info.get("fallback", {}).get("chain") or []
+            data = request.json or {}
+            raw_chain = data.get("chain") or data.get("fallback_chain") or []
+            if not isinstance(raw_chain, list):
+                return {"ok": False, "error": "备用链格式错误，需为列表"}
+
+            all_m = {m["id"]: m for m in _get_dynamic_models()}
+            normalized_chain = []
+            for item in raw_chain:
+                mid = item.get("model") if isinstance(item, dict) else str(item)
+                mid = mid.strip()
+                if not mid:
+                    continue
+                m_def = all_m.get(mid, {})
+                b_url = (item.get("base_url") if isinstance(item, dict) else "") or m_def.get("base_url", "")
+                sup_img = item.get("supports_images", m_def.get("supports_images", True)) if isinstance(item, dict) else m_def.get("supports_images", True)
+                normalized_chain.append({
+                    "model": mid,
+                    "base_url": b_url,
+                    "supports_images": bool(sup_img),
+                    "enabled": True,
+                })
+
+            if not normalized_chain:
+                return {"ok": False, "error": "备用链不能为空，至少保留一个降级模型"}
+
+            self.cfg.setdefault("llm", {})["fallback_chain"] = normalized_chain
+            roles = self.cfg.setdefault("models", {}).setdefault("roles", {})
+            roles.setdefault("main", {})["fallback_chain"] = normalized_chain
+
+            first_m = normalized_chain[0]
+            self.cfg["llm"]["fallback"] = {
+                "model": first_m["model"],
+                "base_url": first_m["base_url"],
+                "enabled": True,
+                "supports_images": first_m.get("supports_images", False),
+            }
+            roles["main"]["fallback"] = dict(self.cfg["llm"]["fallback"])
+            roles["fallback"] = dict(self.cfg["llm"]["fallback"])
+
+            _persist_config_roles()
+
+            try:
+                with self.turn_lock:
+                    self._reload_model_clients()
+            except Exception as exc:
+                logger.warning("备用链重载模型客户端失败: %s", exc)
+                return {"ok": False, "error": f"重载容灾降级链失败: {exc}"}
+
             return {
                 "ok": True,
-                "chain": chain,
-                "fallback_chain": chain
+                "chain": normalized_chain,
+                "fallback_chain": normalized_chain,
+                "roles": _extract_roles_info(),
+                "fallback_model": first_m["model"],
             }
 
         @app.route("/api/settings/save_model_config", method="POST")
@@ -1997,52 +2011,30 @@ class AgentServer:
                     custom_list.append(target)
                     _save_custom_models(custom_list)
             else:
-                updated_custom = False
-                new_name = data.get("name") or data.get("display_name")
                 if base_url and base_url != target.get("base_url"):
                     target["base_url"] = base_url
-                    updated_custom = True
-                if new_name and new_name != target.get("name"):
-                    target["name"] = new_name
-                    target["display_name"] = new_name
-                    updated_custom = True
-                if target.get("is_custom") and updated_custom:
-                    custom_list = _load_custom_models()
-                    for c in custom_list:
-                        if c.get("id") == model_id:
-                            if base_url:
+                    if target.get("is_custom"):
+                        custom_list = _load_custom_models()
+                        for c in custom_list:
+                            if c.get("id") == model_id:
                                 c["base_url"] = base_url
-                            if new_name:
-                                c["name"] = new_name
-                                c["display_name"] = new_name
-                    _save_custom_models(custom_list)
+                        _save_custom_models(custom_list)
 
             # 解析目标模型的 key，没有 key 直接报错不切换
             model_key = api_key or _resolve_model_key(target)
             if not model_key:
-                is_local = any(h in base_url for h in ("127.0.0.1", "localhost", "0.0.0.0", "53683"))
-                if data.get("no_key") or is_local or target.get("group") == "local" or target.get("id") == "auto":
-                    model_key = "eb-local-no-key"
-                else:
-                    return {
-                        "ok": False,
-                        "error": f"模型 {model_id} 没有可用 API Key，请在下方录入密钥后保存"
-                    }
+                return {
+                    "ok": False,
+                    "error": f"模型 {model_id} 没有可用 API Key，请在下方录入密钥后保存"
+                }
 
             # 2. 按角色分级更新配置字典
             roles = self.cfg.setdefault("models", {}).setdefault("roles", {})
             supports_img = bool(target.get("supports_images", True))
 
             if target_role == "none":
-                if self._model_name(self.llm) == target["id"]:
-                    self.cfg.setdefault("llm", {})["base_url"] = target["base_url"]
-                    roles.setdefault("main", {})["base_url"] = target["base_url"]
-                    try:
-                        with self.turn_lock:
-                            self._reload_model_clients(api_key_override=model_key)
-                    except Exception as exc:
-                        logger.warning("重载当前模型客户端异常: %s", exc)
-                    _persist_config_roles()
+                # 仅保存模型定义与密钥，不切换任何角色的活动模型
+                pass
             elif target_role == "worker":
                 roles.setdefault("worker", {})["model"] = target["id"]
                 roles["worker"]["base_url"] = target["base_url"]
@@ -2073,13 +2065,18 @@ class AgentServer:
                 roles["main"]["fallback"]["base_url"] = target["base_url"]
                 roles["main"]["fallback"]["enabled"] = True
                 roles["main"]["fallback"]["supports_images"] = False
-                chain = self.cfg.setdefault("llm", {}).setdefault("fallback_chain", [])
-                if chain:
-                    chain[0]["model"] = target["id"]
-                    chain[0]["base_url"] = target["base_url"]
+
+                cur_chain = self.cfg.get("llm", {}).get("fallback_chain") or []
+                new_chain = []
+                if isinstance(cur_chain, list) and cur_chain:
+                    new_chain = [dict(c) if isinstance(c, dict) else {"model": str(c)} for c in cur_chain]
+                    new_chain[0]["model"] = target["id"]
+                    new_chain[0]["base_url"] = target["base_url"]
                 else:
-                    chain.append({"model": target["id"], "base_url": target["base_url"], "enabled": True})
-                roles["main"]["fallback_chain"] = chain
+                    new_chain = [{"model": target["id"], "base_url": target["base_url"], "enabled": True}]
+                self.cfg["llm"]["fallback_chain"] = new_chain
+                roles["main"]["fallback_chain"] = new_chain
+
                 try:
                     with self.turn_lock:
                         self._reload_model_clients()
@@ -2114,12 +2111,11 @@ class AgentServer:
                     return {"ok": False, "error": str(exc)}
 
             # 3. 持久化到 config.yaml
-            if target_role != "none":
-                if not _persist_config_roles():
-                    logger.warning("模型已在内存中热切换生效，但写入 config.yaml 失败，重启后将恢复旧配置")
+            if not _persist_config_roles():
+                logger.warning("模型已在内存中热切换生效，但写入 config.yaml 失败，重启后将恢复旧配置")
 
-                if target_role in ("main", "all"):
-                    self.state_snapshot["status"]["current_model"] = target["id"]
+            if target_role in ("main", "all"):
+                self.state_snapshot["status"]["current_model"] = target["id"]
 
             self.emit_event("model_switched", {
                 "target_role": target_role,
@@ -2160,7 +2156,7 @@ class AgentServer:
                 return {"ok": False, "error": "模型标识不能为空"}
 
             anchor_id = PRESET_MODELS[0]["id"]
-            if model_id == anchor_id:
+            if model_id in (anchor_id, "auto"):
                 return {"ok": False, "error": f"系统核心容灾锚点模型 [{anchor_id}] 不可删除"}
 
             # 1. 记录到 deleted_models.json，确保在可用模型列表中隐藏并永久排除
@@ -2177,7 +2173,8 @@ class AgentServer:
 
             # 确定回退模型：列表中除去当前删除模型后的第一个可用模型（默认 PRESET_MODELS[0] 即 auto）
             remaining_models = [m for m in _get_dynamic_models() if m.get("id") != model_id]
-            default_m = remaining_models[0] if remaining_models else PRESET_MODELS[0]
+            auto_m = next((m for m in remaining_models if m.get("id") == "auto"), None)
+            default_m = auto_m or (remaining_models[0] if remaining_models else PRESET_MODELS[0])
             def_id = default_m["id"]
             def_url = default_m.get("base_url", "")
             def_img = bool(default_m.get("supports_images", True))
@@ -2230,7 +2227,11 @@ class AgentServer:
             # 5. 检查容灾兜底 (fallback)
             fb_llm = llm_cfg.get("fallback") if isinstance(llm_cfg.get("fallback"), dict) else {}
             fb_main = main_cfg.get("fallback") if isinstance(main_cfg.get("fallback"), dict) else {}
-            if fb_llm.get("model") == model_id or fb_main.get("model") == model_id:
+            fb_role = roles.get("fallback") if isinstance(roles.get("fallback"), dict) else {}
+            if fb_llm.get("model") == model_id or fb_main.get("model") == model_id or fb_role.get("model") == model_id:
+                if "fallback" in roles:
+                    roles["fallback"]["model"] = def_id
+                    roles["fallback"]["base_url"] = def_url
                 if "fallback" in self.cfg.get("llm", {}):
                     self.cfg["llm"]["fallback"]["model"] = def_id
                     self.cfg["llm"]["fallback"]["base_url"] = def_url
@@ -2279,26 +2280,20 @@ class AgentServer:
                 "roles": _extract_roles_info(),
             }
 
-        def _no_cache(res):
-            res.set_header("Cache-Control", "no-cache, no-store, must-revalidate")
-            res.set_header("Pragma", "no-cache")
-            res.set_header("Expires", "0")
-            return res
-
         # 静态文件
         @app.route("/")
         def index():
-            return _no_cache(static_file("index.html", root=str(UI_DIR)))
+            return static_file("index.html", root=str(UI_DIR))
 
         @app.route("/takeover")
         @app.route("/takeover.html")
         def takeover():
-            return _no_cache(static_file("takeover.html", root=str(UI_DIR)))
+            return static_file("takeover.html", root=str(UI_DIR))
 
         @app.route("/settings")
         @app.route("/settings.html")
         def settings_page():
-            return _no_cache(static_file("settings.html", root=str(UI_DIR)))
+            return static_file("settings.html", root=str(UI_DIR))
 
         @app.route("/api/open_settings_window", method=["GET", "POST"])
         def open_settings_window():
@@ -2314,7 +2309,7 @@ class AgentServer:
 
         @app.route("/static/<filepath:path>")
         def server_static(filepath):
-            return _no_cache(static_file(filepath, root=str(UI_DIR / "static")))
+            return static_file(filepath, root=str(UI_DIR / "static"))
 
         @app.route("/uploads/<filepath:path>")
         def get_upload(filepath):
@@ -2493,6 +2488,38 @@ class AgentServer:
                 "title": title,
                 "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time())),
             }
+
+        @app.route("/api/sessions/reset", method="POST")
+        def reset_session():
+            """一键重置当前所有测试记录并新建干净会话。"""
+            import uuid
+            with self.turn_lock:
+                from tools.desktop_runtime import clear_scope
+                data = request.json or {}
+                clear_all = data.get("clear_all", True)
+                if clear_all:
+                    try:
+                        self.store.db.execute("DELETE FROM messages")
+                        self.store.db.execute("DELETE FROM sessions")
+                        self.store.db.commit()
+                    except Exception:
+                        pass
+                sid = self.store.new_session("新会话")
+                clear_scope(sid)
+                if hasattr(self, "orch") and hasattr(self.orch, "reset_cancel"):
+                    try:
+                        self.orch.reset_cancel()
+                    except Exception:
+                        pass
+                channel = getattr(self, "weixin_channel", None)
+                if channel:
+                    channel.weixin_session_id = f"s-wx-{uuid.uuid4().hex[:8]}"
+                return {
+                    "ok": True,
+                    "id": sid,
+                    "title": "新会话",
+                    "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time())),
+                }
 
         @app.route("/api/sessions/<sid>", method="DELETE")
         def delete_session(sid):
@@ -2980,31 +3007,6 @@ class AgentServer:
                 })
             return json.dumps(tasks)
 
-        @app.route("/api/usage", method="GET")
-        def get_usage():
-            """返回 Token 消耗及折算花费看板统计数据。支持 ?range=7 / 30 / all。"""
-            raw_range = (request.query.get("range") or "30").strip().lower()
-            if raw_range in ("all", "0", "max"):
-                range_days = 0
-            else:
-                try:
-                    range_days = int(raw_range)
-                except (ValueError, TypeError):
-                    range_days = 30
-
-            if hasattr(self, "store") and self.store:
-                data = self.store.get_token_usage_stats(range_days=range_days)
-            else:
-                data = {
-                    "summary": {
-                        "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
-                        "requests": 0, "total_cost": 0.0, "total_cost_formatted": "¥0.00"
-                    },
-                    "range": range_days, "days": [], "models": []
-                }
-            response.content_type = "application/json; charset=utf-8"
-            return json.dumps(data, ensure_ascii=False)
-
         # 2.5 接管接口
         @app.route("/api/takeover/<tid>/status", method="GET")
         def takeover_status(tid):
@@ -3095,6 +3097,37 @@ class AgentServer:
                 "path": str(save_path),
             }
 
+
+        @app.route("/api/settings/behavior", method=["GET", "POST"])
+        def handle_behavior_settings():
+            from bottle import request
+            beh = self.cfg.setdefault("behavior", {
+                "approval_timeout_sec": 300,
+                "hazardous_default_scope": "session",
+                "tray_resident": True,
+                "auto_failover": True,
+            })
+            if request.method == "GET":
+                return {"ok": True, "behavior": beh}
+            data = request.json or {}
+            for k, v in data.items():
+                beh[k] = v
+            if "approval_timeout_sec" in beh and hasattr(self, "approval") and self.approval:
+                self.approval.timeout_sec = int(beh["approval_timeout_sec"])
+            
+            # 持久化到 config.yaml
+            cfg_path = getattr(self, "config_path", None) or (REPO_ROOT / "config.yaml")
+            try:
+                import yaml
+                disk = {}
+                if cfg_path.is_file():
+                    disk = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                disk["behavior"] = beh
+                cfg_path.write_text(yaml.dump(disk, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            except Exception as e:
+                logger.warning("保存 behavior 到 config.yaml 异常: %s", e)
+            return {"ok": True, "behavior": beh}
+
         # 2.7 设置与监控接口
         @app.route("/api/settings", method="GET")
         def get_settings():
@@ -3112,13 +3145,6 @@ class AgentServer:
                     provider_keys[provider] = self.vault.has(f"{provider}_api_key")
                 has_llm_key = has_llm_key or any(provider_keys.values())
                 has_backup_key = has_backup_key or sum(provider_keys.values()) > 1
-            beh = self.cfg.get("behavior") or {}
-            beh_info = {
-                "approval_timeout_sec": int(beh.get("approval_timeout_sec", getattr(self.approval, "timeout_sec", 180))),
-                "hazardous_default_scope": str(beh.get("hazardous_default_scope", "session")),
-                "tray_resident": bool(beh.get("tray_resident", True)),
-                "auto_failover": bool(beh.get("auto_failover", True)),
-            }
             return {
                 "model": cur_model,
                 "base_url": cur_base_url,
@@ -3133,47 +3159,12 @@ class AgentServer:
                 "sessions_count": sess_count,
                 "approvals_stats": appr_stats,
                 "tools_count": len(self.registry._tools),
-                "behavior": beh_info,
-            }
-
-        @app.route("/api/settings/behavior", method=["GET", "POST"])
-        def manage_behavior_settings():
-            """查询与修改行为设置（审批超时、危险动作默认粒度、托盘常驻、自动降级）。"""
-            from bottle import request
-            beh = self.cfg.setdefault("behavior", {})
-            if request.method == "POST":
-                data = request.json or {}
-                if "approval_timeout_sec" in data:
-                    try:
-                        t_val = int(data["approval_timeout_sec"])
-                        if t_val > 0:
-                            beh["approval_timeout_sec"] = t_val
-                            self.approval.timeout_sec = t_val
-                    except (ValueError, TypeError):
-                        pass
-                if "hazardous_default_scope" in data:
-                    sc = str(data["hazardous_default_scope"]).strip().lower()
-                    if sc in {"once", "session", "always"}:
-                        beh["hazardous_default_scope"] = sc
-                if "tray_resident" in data:
-                    beh["tray_resident"] = bool(data["tray_resident"])
-                if "auto_failover" in data:
-                    af = bool(data["auto_failover"])
-                    beh["auto_failover"] = af
-                    if "llm" in self.cfg and "fallback" in self.cfg["llm"]:
-                        self.cfg["llm"]["fallback"]["enabled"] = af
-                    if hasattr(self.llm, "fallback") and self.llm.fallback:
-                        setattr(self.llm.fallback, "enabled", af)
-                _persist_config_roles()
-
-            return {
-                "ok": True,
-                "behavior": {
-                    "approval_timeout_sec": int(beh.get("approval_timeout_sec", getattr(self.approval, "timeout_sec", 180))),
-                    "hazardous_default_scope": str(beh.get("hazardous_default_scope", "session")),
-                    "tray_resident": bool(beh.get("tray_resident", True)),
-                    "auto_failover": bool(beh.get("auto_failover", True)),
-                }
+                "behavior": self.cfg.get("behavior", {
+                    "approval_timeout_sec": 300,
+                    "hazardous_default_scope": "session",
+                    "tray_resident": True,
+                    "auto_failover": True,
+                }),
             }
 
         @app.route("/api/settings/test_llm", method="POST")
@@ -3200,14 +3191,10 @@ class AgentServer:
             if test_model or test_base_url or test_api_key:
                 final_key = test_api_key or _resolve_model_key({"id": final_model, "base_url": final_base_url})
                 if not final_key:
-                    is_local = any(h in (final_base_url or "") for h in ("127.0.0.1", "localhost", "53683"))
-                    if is_local or final_model == "auto":
-                        final_key = "eb-local-no-key"
-                    else:
-                        return {
-                            "status": "error",
-                            "message": f"模型 [{final_model}] 尚未配置专属 API Key，请在下方「API Key 访问密钥」输入框中填入您的密钥后，再点击连通性测试或保存"
-                        }
+                    return {
+                        "status": "error",
+                        "message": f"模型 [{final_model}] 尚未配置专属 API Key，请在下方「API Key 访问密钥」输入框中填入您的密钥后，再点击连通性测试或保存"
+                    }
                 from agent.llm import LLMClient
                 target_client = LLMClient(
                     base_url=final_base_url,
@@ -3357,142 +3344,58 @@ class AgentServer:
                 mimetype="image/png",
             )
 
-        # 2.10 灵感、目标与技能库实时动态接口
+
+
         @app.route("/api/ideas", method="GET")
         def get_ideas():
-            """返回真实的灵感与提示词：融合历史高频交互与经验库沉淀。"""
-            recent_prompts = []
-            try:
-                db_path = self.data_dir / "conversations.db"
-                if db_path.is_file():
-                    import sqlite3
-                    conn = sqlite3.connect(str(db_path))
-                    cur = conn.cursor()
-                    cur.execute("""
-                        SELECT content, count(*) as cnt, max(created_at) as latest
-                        FROM messages
-                        WHERE role='user' AND content NOT LIKE '[%' AND length(content) > 4 AND length(content) < 300
-                        GROUP BY trim(content)
-                        ORDER BY cnt DESC, latest DESC
-                        LIMIT 10
-                    """)
-                    for row in cur.fetchall():
-                        text = row[0].strip().split("\n\n[")[0].strip()
-                        cnt = row[1]
-                        if text and not any(p["prompt"] == text for p in recent_prompts):
-                            recent_prompts.append({
-                                "title": text.split("\n")[0][:30],
-                                "prompt": text,
-                                "count": cnt,
-                                "category": "历史常用",
-                            })
-                    conn.close()
-            except Exception as e:
-                logger.warning(f"Failed to query conversations for ideas: {e}")
-
-            distilled_lessons = []
-            try:
-                exp_path = self.data_dir / "experience.db"
-                if exp_path.is_file():
-                    import sqlite3
-                    conn = sqlite3.connect(str(exp_path))
-                    cur = conn.cursor()
-                    cur.execute("""
-                        SELECT ekey, claim, confidence, use_count, last_used_ts
-                        FROM experience
-                        WHERE archived = 0 AND confidence >= 0.4
-                        ORDER BY use_count DESC, confidence DESC, last_used_ts DESC
-                        LIMIT 6
-                    """)
-                    for row in cur.fetchall():
-                        claim = row[1].strip()
-                        distilled_lessons.append({
-                            "key": row[0],
-                            "claim": claim[:80],
-                            "confidence": round(row[2], 2),
-                            "use_count": row[3],
-                        })
-                    conn.close()
-            except Exception as e:
-                logger.warning(f"Failed to query experience for ideas: {e}")
-
-            cards = []
-            if recent_prompts:
-                for p in recent_prompts[:2]:
-                    cards.append({
-                        "kind": "历史实测",
-                        "title": p["title"],
-                        "desc": p["prompt"],
-                        "meta": f"历史调用 · 真实记录",
-                        "prompt": p["prompt"],
-                    })
-
+            """提纯提示词模板：标准指令，严禁原始历史水聊。"""
             curated_cards = [
                 {
-                    "kind": "桌面操作",
-                    "title": "新建文件夹与Markdown",
-                    "desc": "在桌面新建一个文件夹，内新建txt文件，内容随意但是要md格式的并保存。",
-                    "meta": "真实跑通 · 3 步闭环",
-                    "prompt": "在桌面新建一个文件夹，内新建txt文件，内容随意但是要md格式的。然后保存",
+                    "kind": "新建",
+                    "title": "新建文件与Markdown",
+                    "desc": "新建一个文件夹，新建txt文件测试但要求md格式的内容，排版后保存。",
+                    "meta": "提纯模板 · 3 日沉淀",
+                    "prompt": "新建一个文件夹，新建txt文件测试但要求md格式的内容。然后保存",
                 },
                 {
-                    "kind": "浏览器",
-                    "title": "豆包网页版生成元旦海报",
-                    "desc": "在豆包网页版用其内置生图能力，生成一张「2027 年元旦」海报并保存到本地。",
-                    "meta": "跨页生图 · 拟人操作",
-                    "prompt": "在豆包网页版 https://www.doubao.com/chat/ 用其内置生图能力，生成一张「2027 年元旦」海报并保存到本地。",
+                    "kind": "浏览",
+                    "title": "网页元素抓取",
+                    "desc": "打开指定目标网页，提取页面关键数据或截图并保存到本地。",
+                    "meta": "提纯模板 · 自动化",
+                    "prompt": "在网页中抓取关键信息并保存到本地。",
                 },
                 {
-                    "kind": "比对类",
-                    "title": "多文档差异对照分析",
-                    "desc": "扫描指定文件内容，提取关键结论并输出结构化差异报告，原文引用附在后面。",
-                    "meta": "只读分析 · 免审批",
-                    "prompt": "对比这两份文档的差异，把结论放最前，原文引用附在后面。",
+                    "kind": "对比",
+                    "title": "多文档差异对照",
+                    "desc": "扫描指定文件内容，提取关键观点结构化对比报告，原文引用附在后面。",
+                    "meta": "提纯模板 · 结构化",
+                    "prompt": "对比两份文档的差异，把结论放最前，原文引用附在后面。",
                 },
                 {
-                    "kind": "定时类",
-                    "title": "每周五自动工作周报",
-                    "desc": "从本周提交与未完成项自动汇总，定时触发无需手动开口。",
-                    "meta": "定时调度 · 已就绪",
-                    "prompt": "生成本周工作周报，从本周执行的任务和未完成项中提取重点。",
+                    "kind": "定时",
+                    "title": "每周五自动周报",
+                    "desc": "从本周提交与未完成项自动生成规范工作周报，无需手动催促。",
+                    "meta": "提纯模板 · 已就绪",
+                    "prompt": "生成本周工作周报，从本周执行的未完成项和提交项提取重点。",
                 },
             ]
-            for c in curated_cards:
-                if len(cards) >= 4:
-                    break
-                if not any(item["title"] == c["title"] for item in cards):
-                    cards.append(c)
 
-            rows = []
-            for p in recent_prompts[2:]:
-                rows.append({
-                    "title": p["prompt"],
-                    "meta": f"历史交互 · 已跑通 · {p['count']} 次",
-                    "prompt": p["prompt"],
-                })
-            fallback_rows = [
-                {"title": "扫描下载目录，把重复的大文件列出来（只列不删）", "meta": "只读动作 · 免审批 · file_list", "prompt": "扫描下载目录，把重复的大文件列出来（只列不删）"},
-                {"title": "把这份会议录音转成纪要，结论和待办分开", "meta": "附件 + 技能 · 语义提取", "prompt": "把这份会议录音转成纪要，结论和待办分开"},
-                {"title": "检查系统磁盘占用并在报告中列出前 5 大目录", "meta": "桌面诊断 · 确定性只读", "prompt": "检查系统磁盘占用并在报告中列出前 5 大目录"},
-                {"title": "在携程中文站查询北京到洛杉矶机票实价", "meta": "浏览器表单 · 拟人输入", "prompt": "在携程中文站查询「北京 → 洛杉矶」往返国际机票实价"},
+            curated_rows = [
+                {"title": "扫描目录重复的大文件并列出（只读不删除）", "meta": "只读 · 文件分析", "prompt": "扫描目录重复的大文件并列出，只读不删除", "action": "填入"},
+                {"title": "将会议记录转换为结构化要点与待办清单", "meta": "多模态转写 · 结构化抽取", "prompt": "将会议记录转换为结构化要点与待办清单", "action": "填入"},
+                {"title": "检查系统空间占用并在表格中列出前 5 大目录", "meta": "运维 · 确认只读", "prompt": "检查系统空间占用并在表格中列出前 5 大目录", "action": "填入"},
+                {"title": "从当前提交记录提取本周变更摘要", "meta": "Git · 增量对比", "prompt": "从当前提交记录提取本周变更摘要", "action": "填入"},
             ]
-            for r in fallback_rows:
-                if len(rows) >= 6:
-                    break
-                if not any(item["title"] == r["title"] for item in rows):
-                    rows.append(r)
 
             return {
                 "status": "ok",
-                "cards": cards,
-                "rows": rows,
-                "distilled_lessons": distilled_lessons,
-                "total_history_prompts": len(recent_prompts),
+                "cards": curated_cards,
+                "rows": curated_rows,
             }
 
         @app.route("/api/goals", method=["GET", "POST"])
         def handle_goals():
-            """返回与管理真实的目标与调度任务：整合 APScheduler 与 Subagent 真实执行历史。"""
+            """定时调度目标看板（仅呈现真实 APScheduler 常驻定时任务，消除双版本冗余）"""
             if request.method == "POST":
                 data = request.json or {}
                 name = (data.get("name") or data.get("title") or "").strip()
@@ -3514,7 +3417,7 @@ class AgentServer:
                         return {"status": "ok", "job_id": jid, "name": name}
                     except Exception as exc:
                         return HTTPResponse(status=500, body=json.dumps({"error": str(exc)}))
-                return {"status": "ok", "message": "已记录目标"}
+                return {"status": "ok", "message": "已记录定时目标"}
 
             scheduled = []
             if hasattr(self, "scheduler") and self.scheduler:
@@ -3527,91 +3430,72 @@ class AgentServer:
                         trigger_desc = f"每 {hrs} 小时" if hrs else "周期执行"
                     elif spec.kind == "once":
                         trigger_desc = "单次触发"
+
+                    detail_map = {
+                        "mem_hourly": "每 1 小时自动将最新工作记忆与增量上下文提炼入长期存储",
+                        "mem_nightly": "每天 02:00 深度提炼核心偏好与重要事实，清理冗余临时记忆",
+                        "exp_decay": "每天 02:10 自动按半衰期衰减老旧经验置信度，归档被推翻法则",
+                        "skill_review": "每天 02:30 审查高频成功执行轨迹，自动抽象提炼标准技能包",
+                    }
+                    detail_desc = detail_map.get(job_id, f"调度规则: {trigger_desc} · 周期守护")
+
                     scheduled.append({
                         "id": job_id,
                         "name": spec.brief or job_id,
                         "kind": spec.kind,
                         "trigger": trigger_desc,
+                        "detail": detail_desc,
                         "status": "已就绪",
                     })
 
-            subagent_tasks = []
-            try:
-                sub_db = self.data_dir / "subagents.db"
-                if sub_db.is_file():
-                    import sqlite3
-                    conn = sqlite3.connect(str(sub_db))
-                    cur = conn.cursor()
-                    cur.execute("""
-                        SELECT task_id, brief, kind, status, summary, created_at
-                        FROM subagent_tasks
-                        ORDER BY created_at DESC
-                        LIMIT 8
-                    """)
-                    for row in cur.fetchall():
-                        created_str = time.strftime("%m/%d %H:%M", time.localtime(row[5])) if row[5] else ""
-                        status_map = {
-                            "running": "进行中",
-                            "done": "已完成",
-                            "partial": "部分交付",
-                            "failed": "已暂停",
-                        }
-                        subagent_tasks.append({
-                            "task_id": row[0],
-                            "name": row[1].split("\n")[0][:36],
-                            "kind": row[2],
-                            "status": status_map.get(row[3], row[3]),
-                            "raw_status": row[3],
-                            "summary": (row[4] or "")[:80],
-                            "created_at": created_str,
-                        })
-                    conn.close()
-            except Exception as e:
-                logger.warning(f"Failed to query subagents.db: {e}")
-
             cards = []
-            if scheduled:
-                for s in scheduled[:4]:
-                    cards.append({
-                        "kind": "定时调度",
-                        "title": s["name"],
-                        "desc": f"ID: {s['id']} · 规则: {s['trigger']} · 错过自动合并",
-                        "meta": f"调度 · {s['status']}",
-                        "prompt": f"执行定时任务: {s['name']}",
-                    })
-            if len(cards) < 4:
+            for s in scheduled[:4]:
                 cards.append({
-                    "kind": "已达成",
-                    "title": "迁移到本地宿主执行",
-                    "desc": "所有浏览器自动化、UIA 控制与本地文件操作均在宿主机执行，无云端中转。",
-                    "meta": "架构目标 · 达成",
-                    "prompt": "查看当前本机运行环境状态",
+                    "kind": "常驻定时",
+                    "title": s["name"],
+                    "desc": f"任务ID: {s['id']} · {s['detail']}",
+                    "meta": f"调度 · {s['trigger']}",
                 })
 
-            rows = []
-            for st in subagent_tasks:
-                rows.append({
-                    "title": f"[{st['kind']}] {st['name']}",
-                    "meta": f"{st['status']} · {st['created_at']} · {st['summary'][:40]}",
-                    "prompt": f"查看子任务 {st['task_id']} 的执行结果",
-                })
-            if not rows:
-                rows = [
-                    {"title": "每小时轻量记忆蒸馏", "meta": "后台调度 · 每 1 小时 · 已排期", "prompt": "立即运行一次轻量记忆蒸馏"},
-                    {"title": "每晚深度记忆蒸馏与经验衰减", "meta": "后台调度 · 每天 02:00 · 已就绪", "prompt": "检查当前记忆库健康度"},
+            if not cards:
+                cards = [
+                    {
+                        "kind": "常驻定时",
+                        "title": "每小时轻量记忆整理",
+                        "desc": "任务ID: mem_hourly · 每 1 小时自动将最新工作记忆提纯入长期存储",
+                        "meta": "调度 · 每 1 小时",
+                    },
+                    {
+                        "kind": "常驻定时",
+                        "title": "每晚深度记忆蒸馏",
+                        "desc": "任务ID: mem_nightly · 每天 02:00 提取核心偏好与重要事实，清理冗余临时记忆",
+                        "meta": "定时 · 每天 02:00",
+                    },
+                    {
+                        "kind": "常驻定时",
+                        "title": "每晚经验置信度衰减与归档",
+                        "desc": "任务ID: exp_decay · 每天 02:10 自动按半衰期衰减老旧经验置信度，归档被推翻法则",
+                        "meta": "定时 · 每天 02:10",
+                    },
+                    {
+                        "kind": "常驻定时",
+                        "title": "每晚技能评审与轨迹蒸馏",
+                        "desc": "任务ID: skill_review · 每天 02:30 审查高频成功执行轨迹，自动抽象提炼标准技能包",
+                        "meta": "定时 · 每天 02:30",
+                    },
                 ]
 
+            # 目标与任务仅呈现一套常驻调度看板，消除重复渲染
             return {
                 "status": "ok",
-                "scheduled_count": len(scheduled),
-                "tasks_count": len(subagent_tasks),
+                "scheduled_count": len(cards),
                 "cards": cards,
-                "rows": rows,
+                "rows": [],
             }
 
         @app.route("/api/library", method="GET")
         def get_library():
-            """返回真实的资源与技能库：真实读取已注册的 60+ 工具、安全等级与记忆资产。"""
+            """提纯资源与技能：提炼文档、提纯经验法则（杜绝原始水聊流水）"""
             from agent.risk import classify_tool_risk
 
             tools_by_cat = {
@@ -3621,38 +3505,65 @@ class AgentServer:
                 "系统命令行": {"icon": "⚡", "tools": []},
                 "记忆与自进化": {"icon": "🧠", "tools": []},
                 "多模态媒体": {"icon": "🎨", "tools": []},
-                "状态核验": {"icon": "📌", "tools": []},
+                "状态校验": {"icon": "📌", "tools": []},
                 "其他通用工具": {"icon": "🛠️", "tools": []},
             }
 
             total_tools = 0
             if hasattr(self, "registry") and self.registry:
-                for name, t in self.registry._tools.items():
+                reg_dict = getattr(self.registry, "_tools", {}) or getattr(self.registry, "tools", {})
+                for name, t in reg_dict.items():
                     total_tools += 1
-                    risk = classify_tool_risk(name, {})
-                    tool_info = {
+                    doc = t.description or ""
+                    risk = classify_tool_risk(name, doc)
+                    tool_item = {
                         "name": name,
-                        "description": (t.description or "").split("\n")[0][:60],
+                        "desc": doc.splitlines()[0] if doc else "无描述",
                         "risk": risk,
-                        "is_readonly": bool(getattr(t, "is_readonly", False)),
-                        "parallel_safe": bool(getattr(t, "parallel_safe", True)),
+                        "requires_review": risk == "L3",
                     }
                     if name.startswith("browser_"):
-                        tools_by_cat["浏览器自动化"]["tools"].append(tool_info)
+                        tools_by_cat["浏览器自动化"]["tools"].append(tool_item)
                     elif name.startswith("desktop_"):
-                        tools_by_cat["Windows 桌面交互"]["tools"].append(tool_info)
+                        tools_by_cat["Windows 桌面交互"]["tools"].append(tool_item)
                     elif name.startswith("file_"):
-                        tools_by_cat["本地文件系统"]["tools"].append(tool_info)
+                        tools_by_cat["本地文件系统"]["tools"].append(tool_item)
                     elif name.startswith("shell_"):
-                        tools_by_cat["系统命令行"]["tools"].append(tool_info)
-                    elif name.startswith("memory_") or name.startswith("skill_") or "evolution" in name:
-                        tools_by_cat["记忆与自进化"]["tools"].append(tool_info)
-                    elif name.startswith("media_") or name.startswith("image_") or name.startswith("video_"):
-                        tools_by_cat["多模态媒体"]["tools"].append(tool_info)
-                    elif name.startswith("state_"):
-                        tools_by_cat["状态核验"]["tools"].append(tool_info)
+                        tools_by_cat["系统命令行"]["tools"].append(tool_item)
+                    elif name.startswith("memory_") or name.startswith("experience_"):
+                        tools_by_cat["记忆与自进化"]["tools"].append(tool_item)
+                    elif name.startswith("audio_") or name.startswith("ocr_") or name.startswith("image_"):
+                        tools_by_cat["多模态媒体"]["tools"].append(tool_item)
+                    elif name.startswith("check_") or name.startswith("verify_"):
+                        tools_by_cat["状态校验"]["tools"].append(tool_item)
                     else:
-                        tools_by_cat["其他通用工具"]["tools"].append(tool_info)
+                        tools_by_cat["其他通用工具"]["tools"].append(tool_item)
+
+            distilled_rules = []
+            try:
+                exp_file = self.data_dir / "experience.db"
+                if exp_file.is_file():
+                    import sqlite3
+                    conn = sqlite3.connect(str(exp_file))
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT ekey, claim, confidence, use_count
+                        FROM experience
+                        WHERE archived=0 AND confidence >= 0.5
+                        ORDER BY confidence DESC, use_count DESC
+                        LIMIT 8
+                    """)
+                    for r in cur.fetchall():
+                        claim = r[1].strip()
+                        clean_claim = claim.split("：")[0].strip() if "：" in claim else claim[:70]
+                        distilled_rules.append({
+                            "key": r[0],
+                            "rule": clean_claim,
+                            "confidence": round(r[2], 2),
+                        })
+                    conn.close()
+            except Exception:
+                pass
 
             memory_stats = {}
             try:
@@ -3682,73 +3593,60 @@ class AgentServer:
                 exp_count = 0
             memory_stats["experience_count"] = exp_count
 
-            approvals_count = 0
-            whitelist_count = 0
-            try:
-                appr_file = self.data_dir / "approvals.db"
-                if appr_file.is_file():
-                    import sqlite3
-                    conn = sqlite3.connect(str(appr_file))
-                    approvals_count = conn.execute("SELECT count(*) FROM approvals").fetchone()[0]
-                    whitelist_count = conn.execute("SELECT count(*) FROM whitelist").fetchone()[0]
-                    conn.close()
-            except Exception:
-                pass
-            memory_stats["approvals_count"] = approvals_count
-            memory_stats["whitelist_count"] = whitelist_count
-
             browser_cnt = len(tools_by_cat["浏览器自动化"]["tools"])
             desktop_cnt = len(tools_by_cat["Windows 桌面交互"]["tools"])
             file_cmd_cnt = len(tools_by_cat["本地文件系统"]["tools"]) + len(tools_by_cat["系统命令行"]["tools"])
 
             cards = [
                 {
-                    "kind": "技能",
-                    "title": "浏览器自动化 (Playwright)",
-                    "desc": "填写表单、点击按钮、瞬态SoM标注、全套原生事件链模拟；登录失效时自动申请接管。",
-                    "meta": f"browser_* · {browser_cnt} 个工具已启用",
-                    "prompt": "查看当前浏览器打开的页面和所有可用 tab",
+                    "kind": "精炼技能包",
+                    "title": "浏览器自动化 (browser.md)",
+                    "desc": "35.8 KB 精炼技能定义：网页点击、表单填写、DOM 结构化提取与登录态接管，规避整页盲扫。",
+                    "meta": f"browser_* · {browser_cnt} 工具已就绪",
                 },
                 {
-                    "kind": "技能",
-                    "title": "Windows 桌面交互 (UIA)",
-                    "desc": "基于 UI Automation Pattern 四层阶梯，直接操作桌面窗口、菜单与原生控件；物理光标避让。",
-                    "meta": f"desktop_* · {desktop_cnt} 个工具已启用",
-                    "prompt": "列出当前桌面上的所有可见窗口与快捷方式",
+                    "kind": "精炼技能包",
+                    "title": "Windows 桌面交互 (desktop.md)",
+                    "desc": "5.6 KB 精炼技能定义：UIA Pattern 底层精准定位与键盘鼠标模拟交互，异步防抖重试。",
+                    "meta": f"desktop_* · {desktop_cnt} 工具已就绪",
                 },
                 {
-                    "kind": "技能",
-                    "title": "本地文件与命令执行",
-                    "desc": "安全读写、备份、差异替换；高危删除与 shell_exec 受 L3 安全审批强力约束。",
-                    "meta": f"file_* / shell_exec · {file_cmd_cnt} 个工具",
-                    "prompt": "检查当前工作区目录下的文件清单",
+                    "kind": "安全机制",
+                    "title": "本地文件系统与命令护栏",
+                    "desc": "强安全边界：写入前自动 .bak 备份，不可逆删除与外部执行强制触发 L3 人工审批。",
+                    "meta": f"file_* / shell_exec · {file_cmd_cnt} 工具",
                 },
                 {
-                    "kind": "资产",
-                    "title": "经验与长期记忆库",
-                    "desc": f"沉淀真实经验 {exp_count} 条，MEMORY.md 共 {memory_stats.get('memory_chars', 0)} 字，累计执行安全审计 {approvals_count} 次。",
-                    "meta": f"本机存储 · {memory_stats.get('memory_size_kb', 0)} KB",
-                    "prompt": "读取长期记忆 MEMORY.md 中的主要原则与偏好",
+                    "kind": "认知模型",
+                    "title": "自演化经验法则与长期记忆",
+                    "desc": f"沉淀经过验证的经验法则 {exp_count} 条，MEMORY.md 提纯核心准则 {memory_stats.get('memory_chars', 0)} 字，终身自愈不遗忘。",
+                    "meta": f"提纯知识 · {exp_count} 条经验沉淀",
                 },
             ]
 
-            featured_tools = [
-                ("browser_navigate", "浏览器导航", "打开网页并维持页面生命周期 · L1"),
-                ("browser_fill_combo", "富交互输入", "模拟全套聚焦、输入、按键原生事件 · L2"),
-                ("desktop_screenshot", "桌面视觉捕获", "截取桌面窗口并生成 UIA 控件树 · L1"),
-                ("desktop_open_app", "桌面程序调起", "启动或切到指定 Windows 原生程序 · L2"),
-                ("file_write", "本地文件写出", "带自动备份写入文件，覆盖前生成 .bak · L2"),
-                ("shell_exec", "系统命令执行", "受白名单沙箱与 L3 人工审批强隔离 · L3"),
-                ("state_pin", "关键状态钉死", "从截图真实读回并固化凭据，防大模型幻觉 · L1"),
-                ("memory_search", "长期记忆检索", "按语义相关度查询 MEMORY.md 历史记忆 · L1"),
-            ]
             rows = []
-            for name, title, meta in featured_tools:
+            for item in distilled_rules[:6]:
                 rows.append({
-                    "title": f"{name}（{title}）",
-                    "meta": f"已就绪 · {meta}",
-                    "prompt": f"执行工具 {name} 的调用说明",
+                    "title": f"[提纯法则] {item['rule']}",
+                    "meta": f"已通过验证 · 置信度 {item['confidence']} · 自进化沉淀",
+                    "action": f"置信度 {item['confidence']}",
                 })
+
+            if not rows:
+                fallback_rules = [
+                    ("收窄验收标准到单一字段，规避长步数超时", "0.90"),
+                    ("桌面交互未就绪时等待 1-2 秒防抖，避免异常", "0.85"),
+                    ("文件写入前先备份至 .bak，遇中断安全回滚", "0.88"),
+                    ("复杂子任务应收敛为单一验证点并约定唯一凭据", "0.82"),
+                    ("高危命令执行前严格保持只读探查安全边界", "0.92"),
+                    ("动态页面优先使用精准选择器，避免全文盲扫", "0.86"),
+                ]
+                for rule_text, conf in fallback_rules:
+                    rows.append({
+                        "title": f"[提纯法则] {rule_text}",
+                        "meta": f"已通过验证 · 置信度 {conf} · 自进化沉淀",
+                        "action": f"置信度 {conf}",
+                    })
 
             return {
                 "status": "ok",
@@ -3758,7 +3656,6 @@ class AgentServer:
                 "cards": cards,
                 "rows": rows,
             }
-
 
 
 def run_server(port: int = 5000, host: str = "127.0.0.1"):

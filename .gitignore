@@ -50,3 +50,6 @@ docs/测试谷歌Gemini 4 Argon速率.py
 
 # v2 UI 迁移（P0，MIGRATION.md §5）：Node 依赖只入库 package.json + package-lock.json
 node_modules/
+
+# 个人记忆文件与本地私有数据
+memory/MEMORY.md

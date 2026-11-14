@@ -2153,6 +2153,14 @@ class Orchestrator:
                     if (isinstance(actual_model, str) and actual_model
                             and llm_span.get("span") is not None):
                         llm_span["span"].name = actual_model
+
+                    if reply.metadata.get("fallback_history"):
+                        for fb in reply.metadata["fallback_history"]:
+                            logger.warning(
+                                "[自动丝滑降级] 原模型 [%s] 异常切换至备用模型 [%s] (原因: %s)",
+                                fb.get("from_model"), fb.get("to_model"), fb.get("summary")
+                            )
+                            self.emit("model_failover", fb)
             except RoutingUnavailable as exc:
                 if getattr(exc, "retryable", False) is not True:
                     raise

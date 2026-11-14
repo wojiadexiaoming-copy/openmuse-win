@@ -279,6 +279,49 @@ def _owned_foreground_modal(owner_hwnd):
     return None
 
 
+def _detect_system_blocking_dialog():
+    """检测当前前台窗口是否为系统级或应用程序阻塞模态框 (如类名 #32770、错误/警告弹窗)。"""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetClassNameW.argtypes = [wintypes.HWND, ctypes.c_wchar_p, ctypes.c_int]
+        user32.GetClassNameW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, ctypes.c_wchar_p, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+
+        fg = int(user32.GetForegroundWindow() or 0)
+        if not fg or not user32.IsWindowVisible(fg):
+            return None
+
+        cls_buf = ctypes.create_unicode_buffer(256)
+        txt_buf = ctypes.create_unicode_buffer(512)
+        user32.GetClassNameW(fg, cls_buf, 256)
+        user32.GetWindowTextW(fg, txt_buf, 512)
+        class_name = cls_buf.value
+        title = txt_buf.value
+
+        is_dialog = class_name == "#32770"
+        title_lower = title.lower()
+        is_warning_or_error = any(kw in title_lower for kw in ["error", "warning", "错误", "警告", "另存为", "确认", "confirm"])
+        if is_dialog or (is_warning_or_error and class_name in ["#32770", "TaskDialog", "DirectUIHWND"]):
+            return {
+                "hwnd": fg,
+                "title": title,
+                "class_name": class_name,
+                "is_dialog": is_dialog,
+                "pid": _get_process_id_from_hwnd(fg),
+            }
+        return None
+    except Exception:
+        return None
+
+
 def _show_target_window(hwnd, command):
     current_state().require_not_halted()
     import ctypes
@@ -290,13 +333,83 @@ def _show_target_window(hwnd, command):
 
 
 def _activate_window(hwnd):
-    """把目标窗口置前；PyGetWindow 抛 PyGetWindowException 时退回 Win32 原生路径。
+    """把目标窗口置前。穿透 Windows 11 前台锁限制 (LockSetForegroundWindow) 并带短轮询校验。
 
     前台锁（Windows foreground lock）会让 activate() 抛异常，但窗口本身可能已经
     可用或已最大化——异常不应被当成"窗口不可用"直接放弃（v1.5.22 P1-2）。
+    强化双向 AttachThreadInput + 模拟 Alt 唤醒输入队列 + SwitchToThisWindow 双重穿透。
     """
     if not hwnd:
         return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        import time
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.BringWindowToTop.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        user32.AttachThreadInput.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.IsIconic.restype = wintypes.BOOL
+
+        if int(user32.GetForegroundWindow() or 0) == hwnd:
+            return True
+
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)
+
+        fg_hwnd = user32.GetForegroundWindow()
+        fg_thread = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+        cur_thread = kernel32.GetCurrentThreadId()
+
+        attached_fg = False
+        attached_target = False
+        if fg_thread and cur_thread and fg_thread != cur_thread:
+            attached_fg = bool(user32.AttachThreadInput(cur_thread, fg_thread, True))
+        if target_thread and cur_thread and target_thread != cur_thread:
+            attached_target = bool(user32.AttachThreadInput(cur_thread, target_thread, True))
+
+        try:
+            # 模拟 Alt 键唤醒 input queue (解锁 Win11 前台锁限制的标准 Win32 技巧)
+            user32.keybd_event(0x12, 0, 0, 0)
+            user32.keybd_event(0x12, 0, 2, 0)
+
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+
+            switch_to = getattr(user32, "SwitchToThisWindow", None)
+            if switch_to:
+                switch_to.argtypes = [wintypes.HWND, wintypes.BOOL]
+                switch_to.restype = None
+                switch_to(hwnd, True)
+        finally:
+            if attached_fg:
+                user32.AttachThreadInput(cur_thread, fg_thread, False)
+            if attached_target:
+                user32.AttachThreadInput(cur_thread, target_thread, False)
+
+        for _ in range(8):
+            try:
+                if int(user32.GetForegroundWindow() or 0) == hwnd or _native_window_info(hwnd).get("foreground") is True:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.05)
+    except Exception as exc:
+        if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
+            raise
+
     try:
         import pygetwindow as gw
         matches = [window for window in gw.getAllWindows()
@@ -316,42 +429,7 @@ def _activate_window(hwnd):
     except Exception as exc:
         if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
             raise
-    try:
-        import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.ShowWindow.restype = wintypes.BOOL
-        user32.BringWindowToTop.argtypes = [wintypes.HWND]
-        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.SetForegroundWindow.restype = wintypes.BOOL
-        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)
-        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
-        current_thread = kernel32.GetCurrentThreadId()
-        attached = False
-        if target_thread and current_thread and target_thread != current_thread:
-            attached = bool(user32.AttachThreadInput(current_thread, target_thread, True))
-        try:
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
-        finally:
-            if attached:
-                user32.AttachThreadInput(current_thread, target_thread, False)
-        try:
-            return _native_window_info(hwnd).get("foreground") is True
-        except Exception as exc:
-            if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
-                raise
-            return False
-    except Exception as exc:
-        if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
-            raise
-        return False
+    return False
 
 
 def _maximize_target_window(window_title="", hwnd=None):
@@ -839,38 +917,65 @@ def desktop_list_shortcuts(args: dict = None) -> str:
     return desktop_list_items(args)
 
 
+def _wait_and_activate_new_window(target_query: str, max_wait: float = 3.5):
+    """动态探测新启动窗口，并在就绪后立即置顶与最大化，确保演示不扑空。"""
+    import time
+    clean = target_query.lower().replace(".exe", "").replace(".lnk", "").strip()
+    end_time = time.monotonic() + max_wait
+    while time.monotonic() < end_time:
+        try:
+            import pygetwindow as gw
+            matches = [w for w in gw.getAllWindows() if clean in (w.title or "").lower() and w.visible]
+            if matches:
+                w = matches[0]
+                hwnd = int(getattr(w, "_hWnd", 0))
+                if hwnd > 0:
+                    _activate_window(hwnd)
+                    layout = _maximize_target_window(hwnd=hwnd)
+                    return {
+                        "ok": True,
+                        "hwnd": hwnd,
+                        "title": w.title or clean,
+                        "layout": layout,
+                    }
+        except Exception:
+            pass
+        time.sleep(0.25)
+    return {"ok": False}
+
+
 def desktop_open_app(args: dict) -> Message | str:
-    """启动或打开桌面上的应用程序、文件夹或文件（支持文件夹名如 ffmeng、软件名如 Clash Verge、快捷方式或绝对路径）。优先智能搜索桌面项目并原生调起。"""
+    """启动或激活目标应用程序、文件或快捷方式（全面增强参数支持与窗口就绪探测）。"""
     target = (args.get("app_name") or args.get("target") or args.get("name") or "").strip()
     if not target:
         return "[打开失败] 未指定 app_name 或 target"
-    # 防命令注入：严格禁止命令连接符与元字符（B3-03）
-    if re.search(r"[&|;<>\r\n`]", target):
-        return f"[打开失败] 非法应用名称或路径，禁止包含命令连接符: {target}"
+    # 命令注入防御：严格禁止换行、管道与分号等连接符
+    _disallowed = {"&", "|", ";", "<", ">", chr(10), chr(13), chr(96)}
+    if any(c in _disallowed for c in target):
+        return f"[打开失败] 非法应用名称或路径，禁止包含连接符: {target}"
     try:
         current_state().require_not_halted()
         current_state().invalidate()
-        # 1. 尝试先查找并激活已打开的窗口（如资源管理器已打开该文件夹，或软件窗口已存在）
-        import pygetwindow as gw
+
         clean_target = target.lower().replace(".exe", "").replace(".lnk", "")
-        matches = [w for w in gw.getAllWindows() if clean_target in (w.title or "").lower()]
-        exact = [w for w in matches if (w.title or "").lower() == clean_target]
-        matched = exact or matches
-        if len(matched) > 1:
-            return "[打开失败] 匹配多个已打开窗口，请提供目标窗口精确标题。"
-        if matched:
-            w = matched[0]
-            try:
+        # 1. 先查已打开的窗口，如果在就直接置顶激活（秒级响应）
+        try:
+            import pygetwindow as gw
+            matches = [w for w in gw.getAllWindows() if clean_target in (w.title or "").lower() and w.visible]
+            exact = [w for w in matches if (w.title or "").lower() == clean_target]
+            matched = exact or matches
+            if len(matched) == 1:
+                w = matched[0]
                 match_hwnd = int(getattr(w, "_hWnd", 0))
                 _activate_window(match_hwnd)
                 layout = _maximize_target_window(hwnd=match_hwnd)
-                return f'[已激活已打开窗口] "{w.title}"' + _layout_note(layout)
-            except Exception as exc:
-                if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
-                    raise
-                pass
+                return f'[已激活已打开窗口] "{w.title}" (HWND: {match_hwnd})' + _layout_note(layout)
+        except Exception as exc:
+            if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
+                raise
+            pass
 
-        # 2. 智能搜索桌面与开始菜单全部项目（包括文件夹、快捷方式、常规文件）
+        # 2. 从开始菜单/桌面找快捷方式/文件
         items = find_desktop_items()
         for it in items:
             name = it["name"]
@@ -879,40 +984,77 @@ def desktop_open_app(args: dict) -> Message | str:
                 p = it["path"]
                 try:
                     os.startfile(str(p), show_cmd=3)
-                    time.sleep(1.2)
+                    win_info = _wait_and_activate_new_window(name, max_wait=3.5)
                     kind_map = {
                         "folder": "文件夹",
                         "shortcut": "快捷方式",
-                        "file": "本地文件",
-                        "start_menu_shortcut": "开始菜单程序",
+                        "file": "文件",
+                        "start_menu_shortcut": "开始菜单项",
                     }
                     kind_cn = kind_map.get(it["type"], "项目")
-                    return f"[已成功打开] 找到桌面{kind_cn} \"{name}\"，已调起打开: {p}；已请求最大化，截图前将验证"
+                    if win_info.get("ok"):
+                        return f'[已成功打开并就绪] 找到{kind_cn} "{name}"，窗口已置顶最大化: "{win_info["title"]}" (HWND: {win_info["hwnd"]})，可立即交互'
+                    return f'[已成功打开] 找到{kind_cn} "{name}"，已启动: {p}，已请求最大化，截图前请验证'
                 except Exception as ex:
                     if isinstance(ex, DesktopHalted) or _is_failsafe_exception(ex):
                         raise
                     logger.warning(f"打开项目 {p} 异常: {ex}")
 
-        # 3. 如果传入的是真实文件或文件夹绝对/相对路径
+        # 3. 如果是本地已存在的绝对或相对路径
         if os.path.exists(target):
             try:
                 os.startfile(target, show_cmd=3)
-                time.sleep(1.2)
-                return f"[已成功打开] 已打开本地路径: {target}；已请求最大化，截图前将验证"
+                win_info = _wait_and_activate_new_window(Path(target).stem, max_wait=3.5)
+                if win_info.get("ok"):
+                    return f'[已成功启动并就绪] 目标窗口 "{win_info["title"]}" (HWND: {win_info["hwnd"]}) 已置顶最大化，可立即交互'
+                return f"[已成功打开] 已打开本地路径: {target}，已请求最大化，截图前请验证"
             except Exception as exc:
                 if isinstance(exc, DesktopHalted) or _is_failsafe_exception(exc):
                     raise
                 pass
 
-        # 4. 否则通过 Windows API 或安全参数化启动（彻底禁用 shell=True 防注入）
+        # 4. 解析程序名与运行参数（全面防御带参数启动崩溃与 CMD 假死）
+        import shlex
+        prog_parts = []
         try:
-            os.startfile(target)
-            time.sleep(1.0)
-            return f"[已通过系统命令启动] {target}；已请求最大化，截图前将验证"
+            prog_parts = shlex.split(target, posix=False)
         except Exception:
-            subprocess.Popen(["cmd.exe", "/c", "start", "", "/max", target], shell=False)
-            time.sleep(1.0)
-            return f"[已通过系统命令启动] {target}；已请求最大化，截图前将验证"
+            prog_parts = [target]
+
+        prog = prog_parts[0] if prog_parts else target
+        prog_args = prog_parts[1:] if len(prog_parts) > 1 else []
+
+        launched = False
+        if prog_args:
+            # 带有参数：优先使用 subprocess.Popen 独立传参启动
+            try:
+                subprocess.Popen(prog_parts, shell=False)
+                launched = True
+            except Exception as ex:
+                logger.warning(f"Popen {prog_parts} 失败: {ex}")
+
+        if not launched:
+            try:
+                os.startfile(target, show_cmd=3)
+                launched = True
+            except Exception:
+                try:
+                    os.startfile(prog, show_cmd=3)
+                    launched = True
+                except Exception:
+                    try:
+                        # 确保参数安全传递给 start，严禁单条带空格字符串导致 CMD 挂起
+                        cmd_args = ["cmd.exe", "/c", "start", "", "/max", prog] + prog_args
+                        subprocess.Popen(cmd_args, shell=False)
+                        launched = True
+                    except Exception as ex2:
+                        return f"[打开失败] 无法启动 {target}: {ex2}"
+
+        # 动态轮询新窗口就绪状态（最长等待 3.5s）
+        win_info = _wait_and_activate_new_window(clean_target, max_wait=3.5)
+        if win_info.get("ok"):
+            return f'[已成功启动并就绪] 目标窗口 "{win_info["title"]}" (HWND: {win_info["hwnd"]}) 已置顶最大化，可立即交互'
+        return f"[已通过系统启动] {target}，已发送启动指令，可立即进行窗口观察或截图验证"
     except Exception as e:
         stopped = _desktop_stop_result("desktop_open_app", e)
         if stopped is not None:

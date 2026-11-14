@@ -394,7 +394,10 @@ class ToolRegistry:
             if self.cache and terminal_tool_control(message) is None:
                 if name in ("file_write", "file_edit"):
                     self.cache.invalidate_tool("file_read")
-                elif (getattr(tool, "cacheable", False) or name in getattr(self.cache, "TTL", {})) and not message.images:
+                if name in ("desktop_click", "desktop_type", "desktop_press", "desktop_hotkey", "desktop_open_app", "desktop_show_desktop", "desktop_open"):
+                    self.cache.invalidate_tool("desktop_list_windows")
+                    self.cache.invalidate_tool("desktop_list_items")
+                if (getattr(tool, "cacheable", False) or name in getattr(self.cache, "TTL", {})) and not message.images:
                     # 当前缓存只存文字；图片结果必须保留完整视觉证据。
                     ttl_sec = getattr(tool, "cache_ttl_sec", 0)
                     self.cache.put(name, args, message.content, ttl_sec=ttl_sec, prov_level=prov_level)

@@ -90,10 +90,10 @@ def resolve_llm_key(vault: Vault) -> str:
         except (PermissionError, KeyError):
             pass
         # 尝试从 vault 中的 agnes_api_key 或 echobird_api_key 恢复
-        for candidate_key in ("echobird_api_key", "agnes_api_key"):
+        for candidate_key in ("cucloud_api_key", "dashscope_api_key", "agnes_api_key", "echobird_api_key"):
             try:
                 k = vault.resolve(candidate_key, caller="agent.main")
-                if k:
+                if k and not (candidate_key == "echobird_api_key" and k.startswith("eb-local-")):
                     try:
                         vault.set("llm_api_key", k)
                     except Exception:

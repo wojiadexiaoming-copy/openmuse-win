@@ -11,12 +11,38 @@ from agent.tools_registry import ToolDefinition
 
 # 由 tools/__init__.register_all 注入（M1 简化：模块级变量）
 WORKSPACE = Path(".").resolve()
+DESKTOP = (Path.home() / "Desktop").resolve()
 
 
 def _safe(path: str) -> Path:
-    p = (WORKSPACE / path).resolve()
-    if WORKSPACE not in p.parents and p != WORKSPACE:
-        raise ValueError(f"路径越界（只允许 {WORKSPACE} 内）: {path}")
+    import re
+    raw = str(path).strip()
+    norm = raw.replace("/", "\\")
+    norm_l = norm.lower()
+
+    # 智能纠正：若模型从旧记忆带入了其它主机的 Desktop 绝对路径 (如 C:\Users\wojia\Desktop\...)
+    # 或相对路径 Desktop/...，统一重定向到当前主机的真实桌面目录
+    m = re.search(r"[\\]desktop[\\]", norm_l)
+    if m:
+        sub = norm[m.end():]
+        p = (DESKTOP / sub).resolve()
+    elif norm_l.startswith("desktop\\"):
+        sub = norm[len("desktop\\"):]
+        p = (DESKTOP / sub).resolve()
+    elif norm_l.startswith("~\\desktop\\"):
+        sub = norm[len("~\\desktop\\"):]
+        p = (DESKTOP / sub).resolve()
+    elif Path(raw).is_absolute():
+        p = Path(raw).resolve()
+    else:
+        p = (WORKSPACE / raw).resolve()
+
+    allowed = (
+        WORKSPACE in p.parents or p == WORKSPACE or
+        DESKTOP in p.parents or p == DESKTOP
+    )
+    if not allowed:
+        raise ValueError(f"路径越界（只允许工作区 {WORKSPACE} 或桌面 {DESKTOP} 内）: {path}")
     return p
 
 

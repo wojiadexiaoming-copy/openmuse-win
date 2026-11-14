@@ -748,6 +748,24 @@ class WeixinChannel:
             if self._check_and_resolve_approval(user_text, token, from_user, bot_id, base_url, context_token):
                 continue
 
+            # 1.5 快捷重置会话指令
+            if user_text.lower() in ["重置", "新会话", "/reset", "reset", "清空"]:
+                import uuid
+                self.weixin_session_id = f"s-wx-{uuid.uuid4().hex[:8]}"
+                if hasattr(self, "orch") and self.orch:
+                    self.orch.session_id = self.weixin_session_id
+                    if hasattr(self.orch, "reset_cancel"):
+                        self.orch.reset_cancel()
+                self.client.send_message(
+                    token,
+                    to_user_id=from_user,
+                    text_content="✨ 会话已成功重置为全新净室状态！所有上下文已清空，您可以开始全新测试。",
+                    from_user_id=bot_id,
+                    host=base_url,
+                    context_token=context_token,
+                )
+                continue
+
             # 2. 常规 Agent 任务执行
             self._dispatch_agent_task(user_text, token, from_user, bot_id, base_url, context_token)
 

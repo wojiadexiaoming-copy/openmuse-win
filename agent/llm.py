@@ -254,8 +254,8 @@ def resolve_key_for_target(base_url: str, model: str, default_key: str = "", vau
             except Exception:
                 pass
 
-    # 4. 阿里云百炼 / DashScope: aliyuncs.com 或 kimi-k3 / qwen3.8-*
-    elif "aliyuncs.com" in url_lower or "dashscope" in url_lower or any(m in model_lower for m in ("kimi-k3", "qwen3.8-omni-flash", "qwen3.8-max")):
+    # 4. 阿里云百炼 / DashScope: aliyuncs.com 或 qwen / kimi / deepseek / glm
+    elif "aliyuncs.com" in url_lower or "dashscope" in url_lower or any(m in model_lower for m in ("kimi", "qwen", "deepseek", "glm")):
         env_key = (os.environ.get("DASHSCOPE_API_KEY", "") or os.environ.get("ALTEREGO_DASHSCOPE_API_KEY", "") or os.environ.get("BAILIAN_API_KEY", "")).strip()
         if env_key:
             return env_key
@@ -267,6 +267,21 @@ def resolve_key_for_target(base_url: str, model: str, default_key: str = "", vau
                         return k
                 except Exception:
                     pass
+        if default_key and default_key.startswith("sk-"):
+            return default_key
+
+    # 4.5 联通云星罗 Token Plan: cucloud.cn 或 MiniMax / aisp
+    elif "cucloud.cn" in url_lower or any(m in model_lower for m in ("minimax", "aisp")):
+        env_key = os.environ.get("CUCLOUD_API_KEY", "").strip()
+        if env_key:
+            return env_key
+        if vault:
+            try:
+                k = vault.resolve("cucloud_api_key", caller="agent.llm:resolve_key_for_target")
+                if k:
+                    return k
+            except Exception:
+                pass
         if default_key and default_key.startswith("sk-"):
             return default_key
 
@@ -289,6 +304,89 @@ def resolve_key_for_target(base_url: str, model: str, default_key: str = "", vau
     return default_key
 
 
+
+def diagnose_llm_error(exc: Exception) -> dict:
+    """精准诊断大模型调用异常，尤其识别平台配额耗尽、限流与认证失败。"""
+    err_str = str(exc or "")
+    err_type = type(exc).__name__
+
+    body_text = ""
+    if hasattr(exc, "response") and getattr(exc, "response", None) is not None:
+        try:
+            body_text += " " + str(getattr(exc.response, "text", ""))
+        except Exception:
+            pass
+    if hasattr(exc, "body") and getattr(exc, "body", None) is not None:
+        body_text += " " + str(getattr(exc, "body", ""))
+    full_text = f"{err_str} {body_text}".lower()
+
+    # 1. 阿里百炼 / 通用平台免费赠送额度耗尽（用完即停 403 AllocationQuota.FreeTierOnly）
+    if any(k in full_text for k in [
+        "allocationquota.freetieronly",
+        "allocationquota",
+        "freetieronly",
+        "free quota exhausted",
+        "free_quota_exhausted",
+        "quota exhausted",
+        "resource has been exhausted",
+    ]):
+        return {
+            "reason": "free_quota_exhausted",
+            "should_retry": False,
+            "status_code": 403,
+            "summary": "阿里百炼免费额度已耗尽 (AllocationQuota.FreeTierOnly: 仅消耗赠送额度功能已触发停止)",
+            "detail": err_str,
+        }
+
+    # 2. 账号欠费 / 余额不足
+    if any(k in full_text for k in ["insufficientbalance", "arrearage", "accountinarrears", "quota_exceeded"]):
+        return {
+            "reason": "insufficient_balance",
+            "should_retry": False,
+            "status_code": 402,
+            "summary": "账户欠费或付费额度已用尽 (Insufficient Balance)",
+            "detail": err_str,
+        }
+
+    # 3. 速率限制 / 并发超限 (429 RateLimit)
+    if "ratelimit" in err_type.lower() or any(k in full_text for k in ["ratelimit", "429", "too many requests"]):
+        return {
+            "reason": "rate_limit",
+            "should_retry": True,
+            "status_code": 429,
+            "summary": "并发请求频率超限 (429 Rate Limit Exceeded)",
+            "detail": err_str,
+        }
+
+    # 4. API 密钥失效 (401 Auth)
+    if "auth" in err_type.lower() or any(k in full_text for k in ["401", "invalidapikey", "unauthorized", "invalid_api_key"]):
+        return {
+            "reason": "auth_error",
+            "should_retry": False,
+            "status_code": 401,
+            "summary": "API Key 无效或未授权 (401 Authentication Error)",
+            "detail": err_str,
+        }
+
+    # 5. 上下文长度超出模型最大限制 (400 Context)
+    if any(k in full_text for k in ["maximum context length", "context_length_exceeded", "prompt is too long"]):
+        return {
+            "reason": "context_window_exceeded",
+            "should_retry": False,
+            "status_code": 400,
+            "summary": "对话上下文超过该模型最大窗口限制",
+            "detail": err_str,
+        }
+
+    return {
+        "reason": "general_error",
+        "should_retry": False,
+        "status_code": getattr(exc, "status_code", 500) if hasattr(exc, "status_code") else 500,
+        "summary": f"{err_type}: {err_str[:120]}",
+        "detail": err_str,
+    }
+
+
 class LLMClient:
     def __init__(self, base_url: str, model: str, api_key: str,
                  temperature: float = 0.7, max_tokens: int = 8192,
@@ -300,16 +398,22 @@ class LLMClient:
             clean_url = clean_url[:-len("/chat/completions")].rstrip("/")
         self.base_url = clean_url
         client_cls = _get_sdk_openai_type()
+        import httpx
         is_local = any(h in self.base_url for h in ("127.0.0.1", "localhost", "0.0.0.0", "[::1]"))
         if is_local:
-            import httpx
             http_client = httpx.Client(
                 trust_env=False,
                 timeout=httpx.Timeout(connect=5.0, read=600.0, write=600.0, pool=600.0)
             )
-            self.client = client_cls(base_url=self.base_url, api_key=api_key or "unconfigured_key", http_client=http_client)
         else:
-            self.client = client_cls(base_url=self.base_url, api_key=api_key or "unconfigured_key")
+            # 云端直连长连接热池化：保持 300 秒 Keep-Alive，避免多轮调用反复经历 TCP 三次握手与 TLS 协商
+            limits = httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=300.0)
+            http_client = httpx.Client(
+                trust_env=False,
+                limits=limits,
+                timeout=httpx.Timeout(connect=10.0, read=180.0, write=60.0, pool=300.0)
+            )
+        self.client = client_cls(base_url=self.base_url, api_key=api_key or "unconfigured_key", http_client=http_client)
         self.is_unconfigured = (api_key == "unconfigured_key" or not api_key)
         self.model = model
         self.temperature = temperature
@@ -373,6 +477,8 @@ class LLMClient:
             fb_key = resolved_fb_key or fallback_api_key or os.environ.get("ALTEREGO_BACKUP_LLM_API_KEY", "") or api_key
             if not fb_key and any(h in b_url for h in ("127.0.0.1", "localhost", "53683")):
                 fb_key = "eb-local-no-key"
+            elif not fb_key and allow_unconfigured:
+                fb_key = "unconfigured_key"
 
             if fb_key:
                 fallback_client = cls(
@@ -532,6 +638,27 @@ class LLMClient:
             # Auditing failure must not change the reply or trigger paid fallback calls.
             logger.warning("LLM request observer failed (%s)", type(exc).__name__)
 
+    def prewarm(self) -> bool:
+        """后台预热 HTTP/2 & TLS 连接池，使后续交互消除冷握手延迟。"""
+        if getattr(self, "is_unconfigured", False) or getattr(self, "_is_prewarmed", False):
+            return False
+        if not self.base_url or not self.base_url.startswith("http"):
+            return False
+        try:
+            raw_http = getattr(self.client, "_client", None)
+            if raw_http and hasattr(raw_http, "get"):
+                target = self.base_url.rstrip("/") + "/models"
+                headers = {"Authorization": f"Bearer {getattr(self.client, 'api_key', '')}"}
+                raw_http.get(target, headers=headers, timeout=2.0)
+                self._is_prewarmed = True
+                logger.debug("LLMClient [%s] 云端长连接后台预热完成: %s", self.model, target)
+                return True
+        except Exception as exc:
+            self._is_prewarmed = True
+            logger.debug("LLMClient [%s] 预热握手完成（非阻塞）: %s", self.model, exc)
+            return False
+        return False
+
     def chat(self, messages: list[Message], tools: list[dict] | None = None,
              known_tools: set[str] | None = None) -> Message:
         """调一次 LLM，按实际发出的主/备请求分别报告脱敏诊断元数据。"""
@@ -547,8 +674,10 @@ class LLMClient:
             payload = [self._to_openai(m) for m in messages]
             kwargs: dict = {
                 "model": self.model, "messages": payload,
-                "temperature": self.temperature, "max_tokens": self.max_tokens,
+                "max_tokens": self.max_tokens,
             }
+            if self.temperature is not None and not any(k in (self.model or "").lower() for k in ("kimi",)):
+                kwargs["temperature"] = self.temperature
             kwargs.update(_request_options_snapshot(self.request_options))
             if tools:
                 kwargs["tools"] = tools
@@ -609,8 +738,12 @@ class LLMClient:
                                     self.model,
                                 )
                                 continue
+                        diagnosis = diagnose_llm_error(_req_exc)
+                        # 如果是不可恢复的配额耗尽/鉴权失败等，立即跳过无谓的重试，直接抛出进入备用链降级
+                        if not diagnosis.get("should_retry", False):
+                            raise _req_exc
                         max_retries = getattr(self.client, "max_retries", 2)
-                        if isinstance(max_retries, int) and max_retries > 0 and type(_req_exc).__name__ == "RateLimitError" and attempt == 0:
+                        if isinstance(max_retries, int) and max_retries > 0 and diagnosis.get("reason") == "rate_limit" and attempt == 0:
                             logger.info("[%s] 遇到频率限制 (RateLimitError)，等待 2 秒后重试...", self.model)
                             time.sleep(2.0)
                             continue
@@ -648,13 +781,23 @@ class LLMClient:
                             request_attempted=False,
                         )
                         raise unavailable from None
+                    diagnosis = diagnose_llm_error(exc)
                     logger.warning(
-                        "主模型 [%s] 调用失败 (%s)，自动故障转移至 [%s]",
-                        self.model, type(exc).__name__, self.fallback.model,
+                        "主模型 [%s] 调用异常: %s。自动丝滑切换至降级备用模型 [%s] 继续执行...",
+                        self.model, diagnosis["summary"], self.fallback.model,
                     )
                     fallback_token = _request_context.set(fallback_context)
                     try:
-                        return self.fallback.chat(messages, tools=tools, known_tools=known_tools)
+                        res = self.fallback.chat(messages, tools=tools, known_tools=known_tools)
+                        res.metadata.setdefault("fallback_history", []).append({
+                            "from_model": self.model,
+                            "to_model": self.fallback.model,
+                            "reason": diagnosis["reason"],
+                            "summary": diagnosis["summary"],
+                            "status_code": diagnosis.get("status_code", 500),
+                            "error": str(exc),
+                        })
+                        return res
                     finally:
                         _request_context.reset(fallback_token)
                 raise
