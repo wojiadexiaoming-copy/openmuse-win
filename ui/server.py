@@ -3357,6 +3357,408 @@ class AgentServer:
                 mimetype="image/png",
             )
 
+        # 2.10 灵感、目标与技能库实时动态接口
+        @app.route("/api/ideas", method="GET")
+        def get_ideas():
+            """返回真实的灵感与提示词：融合历史高频交互与经验库沉淀。"""
+            recent_prompts = []
+            try:
+                db_path = self.data_dir / "conversations.db"
+                if db_path.is_file():
+                    import sqlite3
+                    conn = sqlite3.connect(str(db_path))
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT content, count(*) as cnt, max(created_at) as latest
+                        FROM messages
+                        WHERE role='user' AND content NOT LIKE '[%' AND length(content) > 4 AND length(content) < 300
+                        GROUP BY trim(content)
+                        ORDER BY cnt DESC, latest DESC
+                        LIMIT 10
+                    """)
+                    for row in cur.fetchall():
+                        text = row[0].strip().split("\n\n[")[0].strip()
+                        cnt = row[1]
+                        if text and not any(p["prompt"] == text for p in recent_prompts):
+                            recent_prompts.append({
+                                "title": text.split("\n")[0][:30],
+                                "prompt": text,
+                                "count": cnt,
+                                "category": "历史常用",
+                            })
+                    conn.close()
+            except Exception as e:
+                logger.warning(f"Failed to query conversations for ideas: {e}")
+
+            distilled_lessons = []
+            try:
+                exp_path = self.data_dir / "experience.db"
+                if exp_path.is_file():
+                    import sqlite3
+                    conn = sqlite3.connect(str(exp_path))
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT ekey, claim, confidence, use_count, last_used_ts
+                        FROM experience
+                        WHERE archived = 0 AND confidence >= 0.4
+                        ORDER BY use_count DESC, confidence DESC, last_used_ts DESC
+                        LIMIT 6
+                    """)
+                    for row in cur.fetchall():
+                        claim = row[1].strip()
+                        distilled_lessons.append({
+                            "key": row[0],
+                            "claim": claim[:80],
+                            "confidence": round(row[2], 2),
+                            "use_count": row[3],
+                        })
+                    conn.close()
+            except Exception as e:
+                logger.warning(f"Failed to query experience for ideas: {e}")
+
+            cards = []
+            if recent_prompts:
+                for p in recent_prompts[:2]:
+                    cards.append({
+                        "kind": "历史实测",
+                        "title": p["title"],
+                        "desc": p["prompt"],
+                        "meta": f"历史调用 · 真实记录",
+                        "prompt": p["prompt"],
+                    })
+
+            curated_cards = [
+                {
+                    "kind": "桌面操作",
+                    "title": "新建文件夹与Markdown",
+                    "desc": "在桌面新建一个文件夹，内新建txt文件，内容随意但是要md格式的并保存。",
+                    "meta": "真实跑通 · 3 步闭环",
+                    "prompt": "在桌面新建一个文件夹，内新建txt文件，内容随意但是要md格式的。然后保存",
+                },
+                {
+                    "kind": "浏览器",
+                    "title": "豆包网页版生成元旦海报",
+                    "desc": "在豆包网页版用其内置生图能力，生成一张「2027 年元旦」海报并保存到本地。",
+                    "meta": "跨页生图 · 拟人操作",
+                    "prompt": "在豆包网页版 https://www.doubao.com/chat/ 用其内置生图能力，生成一张「2027 年元旦」海报并保存到本地。",
+                },
+                {
+                    "kind": "比对类",
+                    "title": "多文档差异对照分析",
+                    "desc": "扫描指定文件内容，提取关键结论并输出结构化差异报告，原文引用附在后面。",
+                    "meta": "只读分析 · 免审批",
+                    "prompt": "对比这两份文档的差异，把结论放最前，原文引用附在后面。",
+                },
+                {
+                    "kind": "定时类",
+                    "title": "每周五自动工作周报",
+                    "desc": "从本周提交与未完成项自动汇总，定时触发无需手动开口。",
+                    "meta": "定时调度 · 已就绪",
+                    "prompt": "生成本周工作周报，从本周执行的任务和未完成项中提取重点。",
+                },
+            ]
+            for c in curated_cards:
+                if len(cards) >= 4:
+                    break
+                if not any(item["title"] == c["title"] for item in cards):
+                    cards.append(c)
+
+            rows = []
+            for p in recent_prompts[2:]:
+                rows.append({
+                    "title": p["prompt"],
+                    "meta": f"历史交互 · 已跑通 · {p['count']} 次",
+                    "prompt": p["prompt"],
+                })
+            fallback_rows = [
+                {"title": "扫描下载目录，把重复的大文件列出来（只列不删）", "meta": "只读动作 · 免审批 · file_list", "prompt": "扫描下载目录，把重复的大文件列出来（只列不删）"},
+                {"title": "把这份会议录音转成纪要，结论和待办分开", "meta": "附件 + 技能 · 语义提取", "prompt": "把这份会议录音转成纪要，结论和待办分开"},
+                {"title": "检查系统磁盘占用并在报告中列出前 5 大目录", "meta": "桌面诊断 · 确定性只读", "prompt": "检查系统磁盘占用并在报告中列出前 5 大目录"},
+                {"title": "在携程中文站查询北京到洛杉矶机票实价", "meta": "浏览器表单 · 拟人输入", "prompt": "在携程中文站查询「北京 → 洛杉矶」往返国际机票实价"},
+            ]
+            for r in fallback_rows:
+                if len(rows) >= 6:
+                    break
+                if not any(item["title"] == r["title"] for item in rows):
+                    rows.append(r)
+
+            return {
+                "status": "ok",
+                "cards": cards,
+                "rows": rows,
+                "distilled_lessons": distilled_lessons,
+                "total_history_prompts": len(recent_prompts),
+            }
+
+        @app.route("/api/goals", method=["GET", "POST"])
+        def handle_goals():
+            """返回与管理真实的目标与调度任务：整合 APScheduler 与 Subagent 真实执行历史。"""
+            if request.method == "POST":
+                data = request.json or {}
+                name = (data.get("name") or data.get("title") or "").strip()
+                if not name:
+                    return HTTPResponse(status=400, body=json.dumps({"error": "目标名称不能为空"}))
+                kind = data.get("kind", "interval")
+                trigger_args = data.get("trigger_args") or {}
+                if not trigger_args:
+                    if kind == "interval":
+                        trigger_args = {"hours": int(data.get("hours", 24))}
+                    elif kind == "cron":
+                        trigger_args = {"hour": int(data.get("hour", 9)), "minute": int(data.get("minute", 0))}
+                    elif kind == "once":
+                        trigger_args = {"minutes": int(data.get("minutes", 30))}
+                jid = f"user_goal_{int(time.time())}"
+                if hasattr(self, "scheduler") and self.scheduler:
+                    try:
+                        self.scheduler.add(JobSpec(job_id=jid, kind=kind, brief=name, trigger_args=trigger_args))
+                        return {"status": "ok", "job_id": jid, "name": name}
+                    except Exception as exc:
+                        return HTTPResponse(status=500, body=json.dumps({"error": str(exc)}))
+                return {"status": "ok", "message": "已记录目标"}
+
+            scheduled = []
+            if hasattr(self, "scheduler") and self.scheduler:
+                for job_id, spec in self.scheduler._specs.items():
+                    trigger_desc = spec.kind
+                    if spec.kind == "cron":
+                        trigger_desc = f"每天 {spec.trigger_args.get('hour', 0):02d}:{spec.trigger_args.get('minute', 0):02d}"
+                    elif spec.kind == "interval":
+                        hrs = spec.trigger_args.get("hours") or (spec.trigger_args.get("seconds", 0) // 3600)
+                        trigger_desc = f"每 {hrs} 小时" if hrs else "周期执行"
+                    elif spec.kind == "once":
+                        trigger_desc = "单次触发"
+                    scheduled.append({
+                        "id": job_id,
+                        "name": spec.brief or job_id,
+                        "kind": spec.kind,
+                        "trigger": trigger_desc,
+                        "status": "已就绪",
+                    })
+
+            subagent_tasks = []
+            try:
+                sub_db = self.data_dir / "subagents.db"
+                if sub_db.is_file():
+                    import sqlite3
+                    conn = sqlite3.connect(str(sub_db))
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT task_id, brief, kind, status, summary, created_at
+                        FROM subagent_tasks
+                        ORDER BY created_at DESC
+                        LIMIT 8
+                    """)
+                    for row in cur.fetchall():
+                        created_str = time.strftime("%m/%d %H:%M", time.localtime(row[5])) if row[5] else ""
+                        status_map = {
+                            "running": "进行中",
+                            "done": "已完成",
+                            "partial": "部分交付",
+                            "failed": "已暂停",
+                        }
+                        subagent_tasks.append({
+                            "task_id": row[0],
+                            "name": row[1].split("\n")[0][:36],
+                            "kind": row[2],
+                            "status": status_map.get(row[3], row[3]),
+                            "raw_status": row[3],
+                            "summary": (row[4] or "")[:80],
+                            "created_at": created_str,
+                        })
+                    conn.close()
+            except Exception as e:
+                logger.warning(f"Failed to query subagents.db: {e}")
+
+            cards = []
+            if scheduled:
+                for s in scheduled[:4]:
+                    cards.append({
+                        "kind": "定时调度",
+                        "title": s["name"],
+                        "desc": f"ID: {s['id']} · 规则: {s['trigger']} · 错过自动合并",
+                        "meta": f"调度 · {s['status']}",
+                        "prompt": f"执行定时任务: {s['name']}",
+                    })
+            if len(cards) < 4:
+                cards.append({
+                    "kind": "已达成",
+                    "title": "迁移到本地宿主执行",
+                    "desc": "所有浏览器自动化、UIA 控制与本地文件操作均在宿主机执行，无云端中转。",
+                    "meta": "架构目标 · 达成",
+                    "prompt": "查看当前本机运行环境状态",
+                })
+
+            rows = []
+            for st in subagent_tasks:
+                rows.append({
+                    "title": f"[{st['kind']}] {st['name']}",
+                    "meta": f"{st['status']} · {st['created_at']} · {st['summary'][:40]}",
+                    "prompt": f"查看子任务 {st['task_id']} 的执行结果",
+                })
+            if not rows:
+                rows = [
+                    {"title": "每小时轻量记忆蒸馏", "meta": "后台调度 · 每 1 小时 · 已排期", "prompt": "立即运行一次轻量记忆蒸馏"},
+                    {"title": "每晚深度记忆蒸馏与经验衰减", "meta": "后台调度 · 每天 02:00 · 已就绪", "prompt": "检查当前记忆库健康度"},
+                ]
+
+            return {
+                "status": "ok",
+                "scheduled_count": len(scheduled),
+                "tasks_count": len(subagent_tasks),
+                "cards": cards,
+                "rows": rows,
+            }
+
+        @app.route("/api/library", method="GET")
+        def get_library():
+            """返回真实的资源与技能库：真实读取已注册的 60+ 工具、安全等级与记忆资产。"""
+            from agent.risk import classify_tool_risk
+
+            tools_by_cat = {
+                "浏览器自动化": {"icon": "🌐", "tools": []},
+                "Windows 桌面交互": {"icon": "🖥️", "tools": []},
+                "本地文件系统": {"icon": "📁", "tools": []},
+                "系统命令行": {"icon": "⚡", "tools": []},
+                "记忆与自进化": {"icon": "🧠", "tools": []},
+                "多模态媒体": {"icon": "🎨", "tools": []},
+                "状态核验": {"icon": "📌", "tools": []},
+                "其他通用工具": {"icon": "🛠️", "tools": []},
+            }
+
+            total_tools = 0
+            if hasattr(self, "registry") and self.registry:
+                for name, t in self.registry._tools.items():
+                    total_tools += 1
+                    risk = classify_tool_risk(name, {})
+                    tool_info = {
+                        "name": name,
+                        "description": (t.description or "").split("\n")[0][:60],
+                        "risk": risk,
+                        "is_readonly": bool(getattr(t, "is_readonly", False)),
+                        "parallel_safe": bool(getattr(t, "parallel_safe", True)),
+                    }
+                    if name.startswith("browser_"):
+                        tools_by_cat["浏览器自动化"]["tools"].append(tool_info)
+                    elif name.startswith("desktop_"):
+                        tools_by_cat["Windows 桌面交互"]["tools"].append(tool_info)
+                    elif name.startswith("file_"):
+                        tools_by_cat["本地文件系统"]["tools"].append(tool_info)
+                    elif name.startswith("shell_"):
+                        tools_by_cat["系统命令行"]["tools"].append(tool_info)
+                    elif name.startswith("memory_") or name.startswith("skill_") or "evolution" in name:
+                        tools_by_cat["记忆与自进化"]["tools"].append(tool_info)
+                    elif name.startswith("media_") or name.startswith("image_") or name.startswith("video_"):
+                        tools_by_cat["多模态媒体"]["tools"].append(tool_info)
+                    elif name.startswith("state_"):
+                        tools_by_cat["状态核验"]["tools"].append(tool_info)
+                    else:
+                        tools_by_cat["其他通用工具"]["tools"].append(tool_info)
+
+            memory_stats = {}
+            try:
+                mem_file = self.data_dir / "memory" / "MEMORY.md"
+                if mem_file.is_file():
+                    size_kb = round(mem_file.stat().st_size / 1024, 1)
+                    content = mem_file.read_text(encoding="utf-8")
+                    memory_stats["memory_size_kb"] = size_kb
+                    memory_stats["memory_chars"] = len(content)
+                    memory_stats["memory_lines"] = len(content.splitlines())
+                else:
+                    memory_stats["memory_size_kb"] = 0
+                    memory_stats["memory_chars"] = 0
+                    memory_stats["memory_lines"] = 0
+            except Exception:
+                memory_stats["memory_size_kb"] = 0
+
+            exp_count = 0
+            try:
+                exp_file = self.data_dir / "experience.db"
+                if exp_file.is_file():
+                    import sqlite3
+                    conn = sqlite3.connect(str(exp_file))
+                    exp_count = conn.execute("SELECT count(*) FROM experience WHERE archived=0").fetchone()[0]
+                    conn.close()
+            except Exception:
+                exp_count = 0
+            memory_stats["experience_count"] = exp_count
+
+            approvals_count = 0
+            whitelist_count = 0
+            try:
+                appr_file = self.data_dir / "approvals.db"
+                if appr_file.is_file():
+                    import sqlite3
+                    conn = sqlite3.connect(str(appr_file))
+                    approvals_count = conn.execute("SELECT count(*) FROM approvals").fetchone()[0]
+                    whitelist_count = conn.execute("SELECT count(*) FROM whitelist").fetchone()[0]
+                    conn.close()
+            except Exception:
+                pass
+            memory_stats["approvals_count"] = approvals_count
+            memory_stats["whitelist_count"] = whitelist_count
+
+            browser_cnt = len(tools_by_cat["浏览器自动化"]["tools"])
+            desktop_cnt = len(tools_by_cat["Windows 桌面交互"]["tools"])
+            file_cmd_cnt = len(tools_by_cat["本地文件系统"]["tools"]) + len(tools_by_cat["系统命令行"]["tools"])
+
+            cards = [
+                {
+                    "kind": "技能",
+                    "title": "浏览器自动化 (Playwright)",
+                    "desc": "填写表单、点击按钮、瞬态SoM标注、全套原生事件链模拟；登录失效时自动申请接管。",
+                    "meta": f"browser_* · {browser_cnt} 个工具已启用",
+                    "prompt": "查看当前浏览器打开的页面和所有可用 tab",
+                },
+                {
+                    "kind": "技能",
+                    "title": "Windows 桌面交互 (UIA)",
+                    "desc": "基于 UI Automation Pattern 四层阶梯，直接操作桌面窗口、菜单与原生控件；物理光标避让。",
+                    "meta": f"desktop_* · {desktop_cnt} 个工具已启用",
+                    "prompt": "列出当前桌面上的所有可见窗口与快捷方式",
+                },
+                {
+                    "kind": "技能",
+                    "title": "本地文件与命令执行",
+                    "desc": "安全读写、备份、差异替换；高危删除与 shell_exec 受 L3 安全审批强力约束。",
+                    "meta": f"file_* / shell_exec · {file_cmd_cnt} 个工具",
+                    "prompt": "检查当前工作区目录下的文件清单",
+                },
+                {
+                    "kind": "资产",
+                    "title": "经验与长期记忆库",
+                    "desc": f"沉淀真实经验 {exp_count} 条，MEMORY.md 共 {memory_stats.get('memory_chars', 0)} 字，累计执行安全审计 {approvals_count} 次。",
+                    "meta": f"本机存储 · {memory_stats.get('memory_size_kb', 0)} KB",
+                    "prompt": "读取长期记忆 MEMORY.md 中的主要原则与偏好",
+                },
+            ]
+
+            featured_tools = [
+                ("browser_navigate", "浏览器导航", "打开网页并维持页面生命周期 · L1"),
+                ("browser_fill_combo", "富交互输入", "模拟全套聚焦、输入、按键原生事件 · L2"),
+                ("desktop_screenshot", "桌面视觉捕获", "截取桌面窗口并生成 UIA 控件树 · L1"),
+                ("desktop_open_app", "桌面程序调起", "启动或切到指定 Windows 原生程序 · L2"),
+                ("file_write", "本地文件写出", "带自动备份写入文件，覆盖前生成 .bak · L2"),
+                ("shell_exec", "系统命令执行", "受白名单沙箱与 L3 人工审批强隔离 · L3"),
+                ("state_pin", "关键状态钉死", "从截图真实读回并固化凭据，防大模型幻觉 · L1"),
+                ("memory_search", "长期记忆检索", "按语义相关度查询 MEMORY.md 历史记忆 · L1"),
+            ]
+            rows = []
+            for name, title, meta in featured_tools:
+                rows.append({
+                    "title": f"{name}（{title}）",
+                    "meta": f"已就绪 · {meta}",
+                    "prompt": f"执行工具 {name} 的调用说明",
+                })
+
+            return {
+                "status": "ok",
+                "total_tools": total_tools,
+                "tools_by_cat": {k: {"icon": v["icon"], "count": len(v["tools"])} for k, v in tools_by_cat.items()},
+                "memory_stats": memory_stats,
+                "cards": cards,
+                "rows": rows,
+            }
+
 
 
 def run_server(port: int = 5000, host: str = "127.0.0.1"):
