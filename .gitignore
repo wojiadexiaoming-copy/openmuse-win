@@ -35,7 +35,6 @@ tmp*
 app.lock
 settings.json
 custom_models.json
-ui/形象/
 weixin/
 
 # Provider credentials are imported into local Vault, never committed
