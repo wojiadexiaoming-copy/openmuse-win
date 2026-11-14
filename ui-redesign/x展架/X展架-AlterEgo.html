@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AlterEgo · BoHack 2026 X 展架（80×180cm 活力亮色现场展位版）</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%23FF6B00'/><text x='12' y='17' font-size='14' font-family='sans-serif' font-weight='800' fill='white' text-anchor='middle'>A</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%23FF6600'/><text x='12' y='17' font-size='14' font-family='sans-serif' font-weight='800' fill='white' text-anchor='middle'>A</text></svg>">
 <style>
   :root {
-    /* 现场展位活力配色体系（白底 + 亮绿 + 亮橙 + 极高对比度） */
-    --bg-page: #F8FAFC;
+    /* 现场展位活力配色体系（纯净白底 + 亮橙 + 亮绿 + 极高对比度） */
+    --bg-page: #FFFFFF;
     --bg-card: #FFFFFF;
     
     /* 核心主打色：亮橙 & 亮绿 */
@@ -40,9 +40,8 @@
     /* 边框与投影 */
     --border-light: #E2E8F0;
     --border-card: #CBD5E1;
-    --shadow-sm: 0 2px 4px rgba(15, 23, 42, 0.04);
-    --shadow-md: 0 6px 16px rgba(15, 23, 42, 0.06);
-    --shadow-lg: 0 12px 28px rgba(15, 23, 42, 0.09);
+    --shadow-sm: 0 2px 5px rgba(15, 23, 42, 0.04);
+    --shadow-md: 0 6px 18px rgba(15, 23, 42, 0.07);
   }
 
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -70,7 +69,7 @@
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.15);
   }
 
-  /* 顶部与底部的明快活力几何色彩饰条 */
+  /* 顶部活力色彩饰条 */
   .poster::before {
     content: "";
     position: absolute;
@@ -89,7 +88,7 @@
     justify-content: space-between;
   }
 
-  /* ===== 1. 顶部活动条（完全对齐现场展会风格） ===== */
+  /* ===== 1. 顶部活动条 ===== */
   .topbar {
     display: flex;
     justify-content: space-between;
@@ -141,7 +140,7 @@
     flex: none;
   }
 
-  /* ===== 2. Hero 标题区（大字、高对比度） ===== */
+  /* ===== 2. Hero 标题区 ===== */
   .hero {
     padding: 10px 0 6px;
     flex: none;
@@ -198,7 +197,7 @@
     font-weight: 900;
   }
 
-  /* ===== 3. 42小时核心硬核指标看板 (DO IT BETTER 亮色大色块) ===== */
+  /* ===== 3. 四大核心王牌看板 (突显真正干货，拒绝虚行数与小错误码) ===== */
   .metric-board {
     margin: 4px 0 10px;
     display: grid;
@@ -211,58 +210,72 @@
     flex-direction: column;
     align-items: center;
     text-align: center;
-    padding: 8px 4px 7px;
-    border-radius: 12px;
+    padding: 10px 6px 9px;
+    border-radius: 13px;
     position: relative;
     box-shadow: var(--shadow-sm);
   }
   
-  /* 4色明快卡片（与现场大屏亮绿、展架亮橙完全呼应） */
   .metric-item.c-orange {
     background: #FFF7ED;
     border: 2px solid #FDBA74;
   }
+  .metric-item.c-orange .tag-pill { background: #EA580C; color: #FFFFFF; }
   .metric-item.c-orange .metric-val { color: #EA580C; }
 
   .metric-item.c-green {
     background: #ECFDF5;
     border: 2px solid #86EFAC;
   }
+  .metric-item.c-green .tag-pill { background: #059669; color: #FFFFFF; }
   .metric-item.c-green .metric-val { color: #059669; }
 
   .metric-item.c-blue {
     background: #F0F9FF;
     border: 2px solid #BAE6FD;
   }
+  .metric-item.c-blue .tag-pill { background: #0284C7; color: #FFFFFF; }
   .metric-item.c-blue .metric-val { color: #0284C7; }
 
   .metric-item.c-purple {
     background: #FAF5FF;
     border: 2px solid #DDD6FE;
   }
+  .metric-item.c-purple .tag-pill { background: #7C3AED; color: #FFFFFF; }
   .metric-item.c-purple .metric-val { color: #7C3AED; }
 
+  .tag-pill {
+    font-size: 10.5px;
+    font-weight: 900;
+    padding: 2px 7px;
+    border-radius: 999px;
+    letter-spacing: 0.04em;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+  }
+
   .metric-val {
-    font-size: 26.5px;
+    font-size: 21px;
     font-weight: 950;
-    line-height: 1.1;
-    letter-spacing: -0.02em;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
   }
   .metric-lbl {
     font-size: 13px;
     font-weight: 800;
     color: var(--text-title);
-    margin-top: 3px;
+    margin-top: 4px;
     letter-spacing: 0.02em;
   }
   .metric-sub {
     font-size: 11px;
     font-weight: 600;
     color: var(--text-secondary);
-    margin-top: 1px;
+    margin-top: 2px;
+    line-height: 1.25;
   }
 
-  /* ===== 4. 真机实测工作台展区（白底微灰卡片 + 亮色顶条） ===== */
+  /* ===== 4. 真机实测工作台展区 ===== */
   .shot-wrap {
     margin: 2px 0 12px;
     background: #FFFFFF;
@@ -312,7 +325,7 @@
     background: #F8FAFC;
   }
 
-  /* ===== 5. 核心四大能力矩阵（高对比亮色卡片） ===== */
+  /* ===== 5. 核心四大能力矩阵（硬核实力干货展开） ===== */
   .section-tag {
     font-size: 15px;
     font-weight: 900;
@@ -356,7 +369,6 @@
     box-shadow: var(--shadow-sm);
   }
   
-  /* 四大卡片亮绿色与亮橙色区分体系 */
   .card.card-orange {
     border-color: var(--orange-border);
     background: #FFFBF7;
@@ -625,37 +637,41 @@
       <section class="hero">
         <div class="tagline-eyebrow">
           <div class="badge-dot"></div>
-          <span>42 小时现场极限重构 · Windows 原生单机自进化 AI Agent</span>
+          <span>现场极限冲刺 · 首个具身双核自进化本机智能体工作台</span>
         </div>
         <h1 class="main-title">AlterEgo</h1>
         <div class="subtitle-en">AlterEgo: Towards the Zero-Cost Self-Evolving Personal Agent</div>
         <p class="hero-claim">
-          大脑直连<strong>多云商业模型矩阵</strong>，
-          <em>执行与隐私永远留在你的本机</em>。
+          不仅是聊天助手，更是<strong>住在电脑里的另一个你</strong> —— 
+          <em>跨软件自主执行，微信随时随地指挥，越用越聪明</em>。
         </p>
       </section>
 
-      <!-- 3. 42小时核心硬核指标看板 (DO IT BETTER 亮橙亮绿醒目看板) -->
+      <!-- 3. 四大核心王牌看板 (硬核干货能力，拒绝虚代码行数与小错误码) -->
       <section class="metric-board">
         <div class="metric-item c-orange">
-          <div class="metric-val">+41,869</div>
-          <div class="metric-lbl">现场代码净增</div>
-          <div class="metric-sub">净增 273 文件 (+84%)</div>
+          <span class="tag-pill">具身跨端</span>
+          <div class="metric-val">跨软件全操控</div>
+          <div class="metric-lbl">浏览器 + 桌面程序</div>
+          <div class="metric-sub">一句话端到端真干活</div>
         </div>
         <div class="metric-item c-green">
-          <div class="metric-val">0.15 ms</div>
-          <div class="metric-lbl">双级热计算直出</div>
-          <div class="metric-sub">感知提速 1800+ 倍</div>
-        </div>
-        <div class="metric-item c-blue">
-          <div class="metric-val">0 ms / 100%</div>
-          <div class="metric-lbl">403 零延迟自愈</div>
-          <div class="metric-sub">额度耗尽自动切流</div>
+          <span class="tag-pill">离机共生</span>
+          <div class="metric-val">微信远程掌控</div>
+          <div class="metric-lbl">手机实时审批放行</div>
+          <div class="metric-sub">出门在外也能遥控本机</div>
         </div>
         <div class="metric-item c-purple">
-          <div class="metric-val">98%</div>
-          <div class="metric-lbl">SPA 真实发包率</div>
-          <div class="metric-sub">瞬态 SoM + 原生事件</div>
+          <span class="tag-pill">终生生长</span>
+          <div class="metric-val">越用越聪明</div>
+          <div class="metric-lbl">技能自动提炼蒸馏</div>
+          <div class="metric-sub">复杂操作无需教第二遍</div>
+        </div>
+        <div class="metric-item c-blue">
+          <span class="tag-pill">主权闭环</span>
+          <div class="metric-val">数据 100% 本地</div>
+          <div class="metric-lbl">商业多云自愈调度</div>
+          <div class="metric-sub">0成本订阅·隐私绝不出机</div>
         </div>
       </section>
 
@@ -669,80 +685,80 @@
           </div>
           <div class="shot-status-badge">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-            <span>现场真机实测 · 浏览器瞬态 SoM 视觉标记 + 微信移动端双向协同</span>
+            <span>真机实测全景：左屏浏览器瞬态视觉编号定位 · 右屏桌面工作台与微信手机联动</span>
           </div>
         </div>
         <img class="shot-img" src="assets/live_demo.jpg" alt="AlterEgo 现场真机实测录屏：浏览器 SoM 视觉标记与微信协同">
       </section>
 
-      <!-- 5. 核心四大能力矩阵（亮橙与亮绿高对比） -->
+      <!-- 5. 核心四大能力矩阵（硬核实力干货展开） -->
       <div class="section-tag">
-        <div class="section-tag-badge">42H 现场技术突破</div>
-        <span>四大核心战役 · 全量自研硬核实现</span>
+        <div class="section-tag-badge">技术攻坚突破</div>
+        <span>四大核心支柱 · 直击大赛「日新 / Do It Better」核心考察</span>
       </div>
 
       <section class="grid">
-        <!-- 卡片 1：亮绿色 (双级热计算体系) -->
+        <!-- 卡片 1：具身双核引擎 (亮绿色) -->
         <div class="card card-green">
           <div class="card-top">
             <div class="card-icon">
               <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
             </div>
             <div class="card-titles">
-              <span class="card-badge">独创自研 · 极速计算</span>
-              <h3>双级热计算体系</h3>
+              <span class="card-badge">打破玩具局限 · 具身闭环</span>
+              <h3>具身跨端双核操作引擎</h3>
             </div>
           </div>
           <p>
-            工具调用级 <b>L1 内存热计算缓存</b> 结合 <b>300s 长连接池</b>，只读探测工具 <b>0.15ms 直出</b>（提速 1800+ 倍）；键鼠写操作精准解耦失效，彻底消除 3.2s 冷启动握手。
+            拒绝“只能在网页点点”的脆弱脚本！融合 <b>Windows UIA 深度无障碍树</b> 与 <b>瞬态 SoM 视觉标定</b>，原生事件链真发包，键盘防误触锁定，自由跨软件替人处理复杂任务。
           </p>
         </div>
 
-        <!-- 卡片 2：亮橙色 (多云协同与403自愈) -->
+        <!-- 卡片 2：微信移动端协同 (亮橙色) -->
         <div class="card card-orange">
-          <div class="card-top">
-            <div class="card-icon">
-              <svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>
-            </div>
-            <div class="card-titles">
-              <span class="card-badge">商业多云 · 容灾接管</span>
-              <h3>403 零延迟自愈降级</h3>
-            </div>
-          </div>
-          <p>
-            直连<b>联通云</b>（MiniMax-M2.5 / DeepSeek-V4）与<b>阿里百炼</b>（Qwen3.8 / Kimi）。内核识别 403 免费配额耗尽硬错误，<b>0ms 跳过无效重试</b>无缝转移下游健康模型。
-          </p>
-        </div>
-
-        <!-- 卡片 3：清新青绿 (微信移动端审批闭环) -->
-        <div class="card card-green">
           <div class="card-top">
             <div class="card-icon">
               <svg viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="3"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
             </div>
             <div class="card-titles">
-              <span class="card-badge">离机掌控 · 双向授权</span>
-              <h3>微信移动端审批闭环</h3>
+              <span class="card-badge">人机协同共生 · 离机无忧</span>
+              <h3>微信 ClawBot 移动端审批</h3>
             </div>
           </div>
           <p>
-            微信扫码绑定，原生 <b>iLink 长轮询</b>；终端特权命令、批量文件修改等高危动作<b>秒级推手机审批卡片</b>，手机微信点放行，本地无缝解锁执行，离机依然安心。
+            首创<b>微信移动端双向长轮询闭环</b>！人在外出会场或路上，手机微信即时派发任务；遇文件改写、终端命令等高危动作，<b>手机秒收审批卡片一键放行</b>，离机也能绝对掌控。
           </p>
         </div>
 
-        <!-- 卡片 4：优雅亮紫 (沙箱硬隔离与自进化) -->
+        <!-- 卡片 3：终生自进化体系 (优雅亮紫) -->
         <div class="card card-purple">
           <div class="card-top">
             <div class="card-icon">
               <svg viewBox="0 0 24 24"><path d="M12 2a8 8 0 0 0-8 8c0 3.3 2 6.2 5 7.4V20a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-2.6c3-1.2 5-4.1 5-7.4a8 8 0 0 0-8-8z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>
             </div>
             <div class="card-titles">
-              <span class="card-badge">沙箱隔离 · 终身进化</span>
-              <h3>进程硬隔离与技能蒸馏</h3>
+              <span class="card-badge">日新精神 · 越用越聪明</span>
+              <h3>技能自动蒸馏与夜间自反思</h3>
             </div>
           </div>
           <p>
-            子智能体独立 <b>multiprocessing 进程沙箱</b>，配内存看门狗与强杀回收；高频成功交互<b>自动蒸馏 Reusable Skill 技能包</b>，夜间自反思剪枝，长期运行永不退化。
+            真正的自主进化生命力！多次成功操作<b>自动抽象为标准化 Reusable Skill 技能包</b>，无需人工重复编写 Prompt；夜间后台自主审查记忆、消除冲突，昨天不会的今天一触即达。
+          </p>
+        </div>
+
+        <!-- 卡片 4：商业多云与绝对隐私 (科技湛蓝) -->
+        <div class="card card-blue">
+          <div class="card-top">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>
+            </div>
+            <div class="card-titles">
+              <span class="card-badge">商业调度 · 绝对隐私</span>
+              <h3>商业多云直连与沙箱容灾</h3>
+            </div>
+          </div>
+          <p>
+            直连<b>联通云</b>（MiniMax-M2.5 / DeepSeek-V4）与<b>阿里百炼</b>（Qwen3.8 / Kimi）；平台配额波动<b>毫秒级无感降级备用链</b>；密码日志与文件 <b>100% 锁死本地沙箱</b>，绝不泄密。
           </p>
         </div>
       </section>
@@ -750,22 +766,22 @@
       <!-- 6. 技术栈微徽章体系 -->
       <section class="stack-box">
         <div class="stack-header">
-          <span>硬核全栈技术栈 · 42 测试套件 100% 自动化通过</span>
-          <span class="tech-highlight">1,847+ 安全与性能防护用例</span>
+          <span>全链路安全与确定性工程 · 42 测试套件 100% 通过</span>
+          <span class="tech-highlight">1,847+ 安全防线与沙箱隔离用例</span>
         </div>
         <div class="chips">
-          <span class="chip c-green">Python 3.12</span>
-          <span class="chip c-green">双级 L1 内存热计算</span>
-          <span class="chip c-green">300s HTTP Keep-Alive</span>
-          <span class="chip c-orange">联通云 MiniMax-M2.5</span>
-          <span class="chip c-orange">阿里百炼 Qwen3.8 / Kimi</span>
-          <span class="chip c-orange">403 零延迟自愈降级</span>
-          <span class="chip c-blue">Playwright 原生事件链</span>
-          <span class="chip c-blue">瞬态 SoM 视觉标记</span>
-          <span class="chip c-green">微信 ClawBot / iLink</span>
-          <span class="chip c-purple">Windows UIA 桌面控制</span>
-          <span class="chip c-purple">SQLite WAL 增量检查点</span>
-          <span class="chip c-purple">HMAC-SHA256 机密保险箱</span>
+          <span class="chip c-green">Windows UIA 桌面控制</span>
+          <span class="chip c-green">Playwright 原生事件链</span>
+          <span class="chip c-green">瞬态 SoM 视觉标定</span>
+          <span class="chip c-orange">微信 ClawBot 协议栈</span>
+          <span class="chip c-orange">L1~L3 三级安全审批</span>
+          <span class="chip c-orange">多进程沙箱 Watchdog</span>
+          <span class="chip c-purple">自动技能蒸馏 Distiller</span>
+          <span class="chip c-purple">夜间记忆自反思剪枝</span>
+          <span class="chip c-blue">联通云 MiniMax-M2.5</span>
+          <span class="chip c-blue">阿里百炼 Qwen3.8 / Kimi</span>
+          <span class="chip c-blue">多云备用链自动自愈</span>
+          <span class="chip c-green">HMAC-SHA256 机密金库</span>
         </div>
       </section>
 
