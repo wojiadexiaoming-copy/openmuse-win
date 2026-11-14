@@ -3,38 +3,54 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AlterEgo · BoHack 2026 X 展架（80×180cm 极客极光高亮版）</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%2300F2FE'/><text x='12' y='17' font-size='14' font-family='sans-serif' font-weight='800' fill='%23070B14' text-anchor='middle'>A</text></svg>">
+<title>AlterEgo · BoHack 2026 X 展架（80×180cm 活力亮色现场展位版）</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%23FF6B00'/><text x='12' y='17' font-size='14' font-family='sans-serif' font-weight='800' fill='white' text-anchor='middle'>A</text></svg>">
 <style>
   :root {
-    /* 核心夜幕与极光背景体系 */
-    --bg-deep: #070B14;
-    --bg-card: rgba(15, 23, 42, 0.75);
+    /* 现场展位活力配色体系（白底 + 亮绿 + 亮橙 + 极高对比度） */
+    --bg-page: #F8FAFC;
+    --bg-card: #FFFFFF;
     
-    /* 强冲击主题色 */
-    --cyan: #00F2FE;
-    --blue: #38BDF8;
-    --indigo: #6366F1;
-    --violet: #A855F7;
-    --emerald: #10B981;
-    --amber: #F59E0B;
+    /* 核心主打色：亮橙 & 亮绿 */
+    --orange: #FF6600;
+    --orange-dark: #DD5500;
+    --orange-soft: #FFF2E8;
+    --orange-border: #FFC599;
     
-    /* 文字层次 */
-    --text-white: #FFFFFF;
-    --text-silver: #E2E8F0;
-    --text-muted: #94A3B8;
-    --text-faint: #64748B;
+    --green: #059669;
+    --green-bright: #10B981;
+    --green-soft: #E6F8F0;
+    --green-border: #A7F3D0;
     
-    /* 边框与光效 */
-    --border-glass: rgba(255, 255, 255, 0.12);
+    --blue: #0284C7;
+    --blue-soft: #E0F2FE;
+    --blue-border: #BAE6FD;
+    
+    --purple: #7C3AED;
+    --purple-soft: #F3E8FF;
+    --purple-border: #DDD6FE;
+    
+    /* 文字对比 */
+    --text-title: #0F172A;
+    --text-body: #334155;
+    --text-secondary: #475569;
+    --text-muted: #64748B;
+    --text-faint: #94A3B8;
+    
+    /* 边框与投影 */
+    --border-light: #E2E8F0;
+    --border-card: #CBD5E1;
+    --shadow-sm: 0 2px 4px rgba(15, 23, 42, 0.04);
+    --shadow-md: 0 6px 16px rgba(15, 23, 42, 0.06);
+    --shadow-lg: 0 12px 28px rgba(15, 23, 42, 0.09);
   }
 
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { height:100%; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-    background: #020408;
-    color: var(--text-white);
+    background: #E2E8F0;
+    color: var(--text-title);
     display: flex;
     justify-content: center;
     align-items: flex-start;
@@ -45,30 +61,23 @@
   .poster {
     width: 800px;
     height: 1800px;
-    background: radial-gradient(circle at 15% 10%, rgba(0, 242, 254, 0.18) 0%, transparent 40%),
-                radial-gradient(circle at 85% 32%, rgba(168, 85, 247, 0.18) 0%, transparent 40%),
-                radial-gradient(circle at 12% 65%, rgba(16, 185, 129, 0.14) 0%, transparent 42%),
-                radial-gradient(circle at 88% 85%, rgba(245, 158, 11, 0.14) 0%, transparent 38%),
-                linear-gradient(180deg, #070B14 0%, #0B1222 35%, #080D1A 70%, #050810 100%);
+    background: #FFFFFF;
     display: flex;
     flex-direction: column;
     padding: 30px 42px 28px;
     position: relative;
     overflow: hidden;
-    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.15);
   }
 
-  /* 极客网格纹理底纹 */
+  /* 顶部与底部的明快活力几何色彩饰条 */
   .poster::before {
     content: "";
     position: absolute;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background-image: 
-      linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
-    background-size: 30px 30px;
-    pointer-events: none;
-    z-index: 1;
+    top: 0; left: 0; right: 0;
+    height: 8px;
+    background: linear-gradient(90deg, #FF6600 0%, #F59E0B 35%, #10B981 70%, #0284C7 100%);
+    z-index: 10;
   }
 
   .content-layer {
@@ -80,141 +89,121 @@
     justify-content: space-between;
   }
 
-  /* ===== 1. 顶部活动荣誉条 ===== */
+  /* ===== 1. 顶部活动条（完全对齐现场展会风格） ===== */
   .topbar {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding-bottom: 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    border-bottom: 2px solid var(--border-light);
     flex: none;
   }
   .topbar .event-badge {
     display: flex;
     align-items: center;
     gap: 10px;
-    flex-wrap: nowrap;
   }
   .event-logo-box {
-    background: linear-gradient(135deg, #00F2FE, #4FACFE);
-    color: #070B14;
+    background: var(--orange);
+    color: #FFFFFF;
     font-weight: 900;
-    font-size: 13px;
-    padding: 3px 9px;
+    font-size: 13.5px;
+    padding: 4px 10px;
     border-radius: 6px;
-    letter-spacing: 0.06em;
-    flex: none;
+    letter-spacing: 0.04em;
+    box-shadow: 0 2px 6px rgba(255, 102, 0, 0.25);
   }
   .event-name {
     font-size: 17px;
-    font-weight: 700;
-    color: var(--text-white);
-    letter-spacing: 0.03em;
+    font-weight: 800;
+    color: var(--text-title);
+    letter-spacing: 0.02em;
     white-space: nowrap;
   }
   .track-pill {
     display: flex;
     align-items: center;
     gap: 8px;
-    background: rgba(245, 158, 11, 0.15);
-    border: 1px solid rgba(245, 158, 11, 0.45);
+    background: var(--green-soft);
+    border: 1.5px solid var(--green-border);
     padding: 5px 12px;
     border-radius: 999px;
-    font-size: 14px;
-    font-weight: 600;
-    color: #FCD34D;
+    font-size: 13.5px;
+    font-weight: 800;
+    color: var(--green);
     white-space: nowrap;
   }
   .track-pill .dot {
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    background: #F59E0B;
-    box-shadow: 0 0 8px #F59E0B;
+    background: var(--green);
     flex: none;
   }
 
-  /* ===== 2. Hero 醒目标题区 ===== */
+  /* ===== 2. Hero 标题区（大字、高对比度） ===== */
   .hero {
-    padding: 12px 0 8px;
+    padding: 10px 0 6px;
     flex: none;
   }
   .tagline-eyebrow {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    background: rgba(0, 242, 254, 0.12);
-    border: 1px solid rgba(0, 242, 254, 0.35);
+    background: var(--orange-soft);
+    border: 1.5px solid var(--orange-border);
     padding: 4px 12px;
-    border-radius: 8px;
+    border-radius: 6px;
     font-size: 13.5px;
-    font-weight: 700;
-    color: var(--cyan);
+    font-weight: 800;
+    color: var(--orange);
     letter-spacing: 0.04em;
-    margin-bottom: 8px;
-    box-shadow: 0 0 14px rgba(0, 242, 254, 0.15);
+    margin-bottom: 6px;
   }
-  .tagline-eyebrow .pulse {
+  .tagline-eyebrow .badge-dot {
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--cyan);
-    box-shadow: 0 0 8px var(--cyan);
-    animation: blink 2s infinite;
-  }
-  @keyframes blink {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(0.85); }
+    background: var(--orange);
   }
 
   .main-title {
-    font-size: 90px;
-    font-weight: 900;
+    font-size: 92px;
+    font-weight: 950;
     line-height: 0.95;
-    letter-spacing: -0.02em;
-    background: linear-gradient(135deg, #FFFFFF 0%, #F1F5F9 45%, #38BDF8 75%, #00F2FE 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    filter: drop-shadow(0 4px 18px rgba(0, 242, 254, 0.30));
+    letter-spacing: -0.03em;
+    color: var(--text-title);
   }
   .subtitle-en {
-    margin-top: 6px;
-    font-size: 18.5px;
-    color: var(--text-muted);
-    font-weight: 500;
-    letter-spacing: 0.02em;
+    margin-top: 5px;
+    font-size: 18px;
+    color: var(--text-secondary);
+    font-weight: 600;
+    letter-spacing: 0.01em;
   }
   .hero-claim {
     margin-top: 8px;
-    font-size: 23.5px;
+    font-size: 23px;
     line-height: 1.35;
-    font-weight: 700;
-    color: var(--text-silver);
+    font-weight: 800;
+    color: var(--text-title);
   }
   .hero-claim strong {
-    background: linear-gradient(90deg, #00F2FE, #38BDF8);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    color: var(--orange);
+    font-weight: 900;
   }
   .hero-claim em {
     font-style: normal;
-    background: linear-gradient(90deg, #FCD34D, #F59E0B);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    color: var(--green);
+    font-weight: 900;
   }
 
-  /* ===== 3. 42小时核心硬核指标看板 (DO IT BETTER) ===== */
+  /* ===== 3. 42小时核心硬核指标看板 (DO IT BETTER 亮色大色块) ===== */
   .metric-board {
-    margin: 6px 0 12px;
-    background: rgba(15, 23, 42, 0.70);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 15px;
-    padding: 10px 14px;
+    margin: 4px 0 10px;
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 9px;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+    gap: 10px;
     flex: none;
   }
   .metric-item {
@@ -222,73 +211,78 @@
     flex-direction: column;
     align-items: center;
     text-align: center;
-    padding: 5px 3px;
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 8px 4px 7px;
+    border-radius: 12px;
     position: relative;
-    overflow: hidden;
+    box-shadow: var(--shadow-sm);
   }
-  .metric-item::before {
-    content: "";
-    position: absolute;
-    top: 0; left: 0; right: 0; height: 3px;
+  
+  /* 4色明快卡片（与现场大屏亮绿、展架亮橙完全呼应） */
+  .metric-item.c-orange {
+    background: #FFF7ED;
+    border: 2px solid #FDBA74;
   }
-  .metric-item.c1::before { background: var(--cyan); box-shadow: 0 0 10px var(--cyan); }
-  .metric-item.c2::before { background: var(--violet); box-shadow: 0 0 10px var(--violet); }
-  .metric-item.c3::before { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
-  .metric-item.c4::before { background: var(--emerald); box-shadow: 0 0 10px var(--emerald); }
+  .metric-item.c-orange .metric-val { color: #EA580C; }
+
+  .metric-item.c-green {
+    background: #ECFDF5;
+    border: 2px solid #86EFAC;
+  }
+  .metric-item.c-green .metric-val { color: #059669; }
+
+  .metric-item.c-blue {
+    background: #F0F9FF;
+    border: 2px solid #BAE6FD;
+  }
+  .metric-item.c-blue .metric-val { color: #0284C7; }
+
+  .metric-item.c-purple {
+    background: #FAF5FF;
+    border: 2px solid #DDD6FE;
+  }
+  .metric-item.c-purple .metric-val { color: #7C3AED; }
 
   .metric-val {
-    font-size: 26px;
-    font-weight: 900;
+    font-size: 26.5px;
+    font-weight: 950;
     line-height: 1.1;
-    letter-spacing: -0.01em;
+    letter-spacing: -0.02em;
   }
-  .metric-item.c1 .metric-val { color: #00F2FE; text-shadow: 0 0 12px rgba(0,242,254,0.4); }
-  .metric-item.c2 .metric-val { color: #C084FC; text-shadow: 0 0 12px rgba(192,132,252,0.4); }
-  .metric-item.c3 .metric-val { color: #FBBF24; text-shadow: 0 0 12px rgba(251,191,36,0.4); }
-  .metric-item.c4 .metric-val { color: #34D399; text-shadow: 0 0 12px rgba(52,211,153,0.4); }
-
   .metric-lbl {
-    font-size: 12.5px;
-    font-weight: 700;
-    color: var(--text-white);
-    margin-top: 2px;
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--text-title);
+    margin-top: 3px;
     letter-spacing: 0.02em;
   }
   .metric-sub {
-    font-size: 10.5px;
-    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
     margin-top: 1px;
   }
 
-  /* ===== 4. 高保真真机实测工作台展区 ===== */
+  /* ===== 4. 真机实测工作台展区（白底微灰卡片 + 亮色顶条） ===== */
   .shot-wrap {
-    margin: 2px 0 14px;
-    background: linear-gradient(135deg, rgba(0, 242, 254, 0.3) 0%, rgba(168, 85, 247, 0.25) 50%, rgba(255, 255, 255, 0.10) 100%);
-    border-radius: 18px;
-    padding: 2.5px;
-    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.7);
+    margin: 2px 0 12px;
+    background: #FFFFFF;
+    border: 2px solid var(--border-card);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: var(--shadow-md);
     flex: none;
   }
-  .shot-inner {
-    background: #090E1D;
-    border-radius: 15px;
-    overflow: hidden;
-    position: relative;
-  }
   .shot-header {
-    background: rgba(15, 23, 42, 0.96);
+    background: #F1F5F9;
     padding: 7px 14px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    border-bottom: 1.5px solid var(--border-light);
   }
   .shot-dots {
     display: flex;
-    gap: 5px;
+    gap: 6px;
   }
   .shot-dot {
     width: 9px;
@@ -300,11 +294,14 @@
   .shot-dot.g { background: #10B981; }
   .shot-status-badge {
     font-size: 12.5px;
-    font-weight: 700;
-    color: var(--cyan);
+    font-weight: 800;
+    color: var(--green);
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  .shot-status-badge svg {
+    stroke: var(--green);
   }
   .shot-img {
     width: 100%;
@@ -312,109 +309,111 @@
     object-fit: cover;
     object-position: center top;
     display: block;
+    background: #F8FAFC;
   }
 
-  /* ===== 5. 核心四大能力矩阵（多色彩高对比高亮卡片） ===== */
+  /* ===== 5. 核心四大能力矩阵（高对比亮色卡片） ===== */
   .section-tag {
-    font-size: 14.5px;
-    font-weight: 800;
-    color: var(--cyan);
-    letter-spacing: 0.10em;
-    text-transform: uppercase;
+    font-size: 15px;
+    font-weight: 900;
+    color: var(--text-title);
+    letter-spacing: 0.06em;
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 9px;
+    margin-bottom: 8px;
     flex: none;
+  }
+  .section-tag-badge {
+    background: var(--orange);
+    color: #FFFFFF;
+    font-size: 12px;
+    font-weight: 900;
+    padding: 2px 8px;
+    border-radius: 4px;
   }
   .section-tag::after {
     content: "";
     flex: 1;
-    height: 1px;
-    background: linear-gradient(90deg, rgba(0, 242, 254, 0.4), transparent);
+    height: 2px;
+    background: var(--border-light);
   }
 
   .grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
     flex: none;
   }
   .card {
-    background: var(--bg-card);
-    backdrop-filter: blur(10px);
-    border-radius: 15px;
-    padding: 15px 15px;
+    background: #FFFFFF;
+    border-radius: 14px;
+    padding: 14px 15px;
     display: flex;
     flex-direction: column;
-    position: relative;
-    border: 1px solid var(--border-glass);
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+    border: 2px solid var(--border-light);
+    box-shadow: var(--shadow-sm);
   }
   
-  /* 四大卡片独立专属光效与强调色 */
-  .card.card-cyan {
-    border-color: rgba(0, 242, 254, 0.35);
-    background: linear-gradient(145deg, rgba(0, 242, 254, 0.08) 0%, rgba(15, 23, 42, 0.85) 100%);
+  /* 四大卡片亮绿色与亮橙色区分体系 */
+  .card.card-orange {
+    border-color: var(--orange-border);
+    background: #FFFBF7;
   }
-  .card.card-amber {
-    border-color: rgba(245, 158, 11, 0.35);
-    background: linear-gradient(145deg, rgba(245, 158, 11, 0.08) 0%, rgba(15, 23, 42, 0.85) 100%);
+  .card.card-green {
+    border-color: var(--green-border);
+    background: #F7FEFA;
   }
-  .card.card-emerald {
-    border-color: rgba(16, 185, 129, 0.35);
-    background: linear-gradient(145deg, rgba(16, 185, 129, 0.08) 0%, rgba(15, 23, 42, 0.85) 100%);
+  .card.card-blue {
+    border-color: var(--blue-border);
+    background: #F6FBFE;
   }
-  .card.card-violet {
-    border-color: rgba(168, 85, 247, 0.35);
-    background: linear-gradient(145deg, rgba(168, 85, 247, 0.08) 0%, rgba(15, 23, 42, 0.85) 100%);
+  .card.card-purple {
+    border-color: var(--purple-border);
+    background: #FAF7FE;
   }
 
   .card-top {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 8px;
+    margin-bottom: 7px;
   }
   .card-icon {
-    width: 38px;
-    height: 38px;
-    border-radius: 10px;
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex: none;
   }
-  .card.card-cyan .card-icon {
-    background: rgba(0, 242, 254, 0.16);
-    box-shadow: 0 0 14px rgba(0, 242, 254, 0.25);
+  .card.card-orange .card-icon {
+    background: var(--orange-soft);
   }
-  .card.card-cyan .card-icon svg { stroke: #00F2FE; }
+  .card.card-orange .card-icon svg { stroke: var(--orange); }
 
-  .card.card-amber .card-icon {
-    background: rgba(245, 158, 11, 0.16);
-    box-shadow: 0 0 14px rgba(245, 158, 11, 0.25);
+  .card.card-green .card-icon {
+    background: var(--green-soft);
   }
-  .card.card-amber .card-icon svg { stroke: #F59E0B; }
+  .card.card-green .card-icon svg { stroke: var(--green); }
 
-  .card.card-emerald .card-icon {
-    background: rgba(16, 185, 129, 0.16);
-    box-shadow: 0 0 14px rgba(16, 185, 129, 0.25);
+  .card.card-blue .card-icon {
+    background: var(--blue-soft);
   }
-  .card.card-emerald .card-icon svg { stroke: #10B981; }
+  .card.card-blue .card-icon svg { stroke: var(--blue); }
 
-  .card.card-violet .card-icon {
-    background: rgba(168, 85, 247, 0.16);
-    box-shadow: 0 0 14px rgba(168, 85, 247, 0.25);
+  .card.card-purple .card-icon {
+    background: var(--purple-soft);
   }
-  .card.card-violet .card-icon svg { stroke: #A855F7; }
+  .card.card-purple .card-icon svg { stroke: var(--purple); }
 
   .card-icon svg {
-    width: 21px;
-    height: 21px;
+    width: 20px;
+    height: 20px;
     fill: none;
-    stroke-width: 2.1;
+    stroke-width: 2.3;
     stroke-linecap: round;
     stroke-linejoin: round;
   }
@@ -424,80 +423,80 @@
     flex-direction: column;
   }
   .card-badge {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 800;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
   }
-  .card.card-cyan .card-badge { color: #38BDF8; }
-  .card.card-amber .card-badge { color: #FBBF24; }
-  .card.card-emerald .card-badge { color: #34D399; }
-  .card.card-violet .card-badge { color: #C084FC; }
+  .card.card-orange .card-badge { color: var(--orange); }
+  .card.card-green .card-badge { color: var(--green); }
+  .card.card-blue .card-badge { color: var(--blue); }
+  .card.card-purple .card-badge { color: var(--purple); }
 
   .card h3 {
     font-size: 18.5px;
-    font-weight: 800;
-    color: var(--text-white);
+    font-weight: 900;
+    color: var(--text-title);
     letter-spacing: -0.01em;
   }
   .card p {
-    font-size: 14px;
-    line-height: 1.46;
-    color: var(--text-silver);
+    font-size: 13.5px;
+    line-height: 1.48;
+    color: var(--text-body);
   }
   .card p b {
-    color: var(--text-white);
-    font-weight: 700;
+    color: var(--text-title);
+    font-weight: 800;
   }
 
-  /* ===== 6. 技术栈多彩微徽章 ===== */
+  /* ===== 6. 技术栈微徽章体系 ===== */
   .stack-box {
-    background: rgba(15, 23, 42, 0.60);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 14px;
-    padding: 11px 15px;
-    margin-bottom: 12px;
+    background: #F8FAFC;
+    border: 1.5px solid var(--border-light);
+    border-radius: 12px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
     flex: none;
   }
   .stack-header {
     font-size: 12.5px;
-    font-weight: 700;
-    color: var(--text-muted);
-    letter-spacing: 0.06em;
-    margin-bottom: 8px;
+    font-weight: 800;
+    color: var(--text-secondary);
+    letter-spacing: 0.04em;
+    margin-bottom: 7px;
     display: flex;
     justify-content: space-between;
   }
   .stack-header span.tech-highlight {
-    color: var(--cyan);
-    font-weight: 800;
+    color: var(--orange);
+    font-weight: 900;
   }
   .chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 7px;
+    gap: 6px;
   }
   .chip {
-    font-size: 13px;
-    font-weight: 700;
-    padding: 4px 11px;
+    font-size: 12.5px;
+    font-weight: 800;
+    padding: 3.5px 10px;
     border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.04);
-    color: var(--text-silver);
+    border: 1.5px solid var(--border-light);
+    background: #FFFFFF;
+    color: var(--text-body);
   }
-  .chip.c-blue { border-color: rgba(56,189,248,0.4); background: rgba(56,189,248,0.1); color: #38BDF8; }
-  .chip.c-amber { border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.1); color: #FBBF24; }
-  .chip.c-green { border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.1); color: #34D399; }
-  .chip.c-purple { border-color: rgba(168,85,247,0.4); background: rgba(168,85,247,0.1); color: #C084FC; }
+  .chip.c-orange { border-color: var(--orange-border); background: var(--orange-soft); color: var(--orange-dark); }
+  .chip.c-green { border-color: var(--green-border); background: var(--green-soft); color: var(--green); }
+  .chip.c-blue { border-color: var(--blue-border); background: var(--blue-soft); color: var(--blue); }
+  .chip.c-purple { border-color: var(--purple-border); background: var(--purple-soft); color: var(--purple); }
 
   /* ===== 7. 底部展台信息与现场扫码区 ===== */
   .footer {
-    background: linear-gradient(180deg, rgba(15, 23, 42, 0.88) 0%, rgba(9, 14, 26, 0.98) 100%);
-    border: 1px solid rgba(255, 255, 255, 0.16);
-    border-radius: 17px;
-    padding: 14px 18px 12px;
-    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+    background: #F8FAFC;
+    border: 2px solid var(--border-card);
+    border-radius: 16px;
+    padding: 13px 18px 11px;
+    box-shadow: var(--shadow-sm);
     flex: none;
   }
   .footer-body {
@@ -510,7 +509,7 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .meta-row {
     display: flex;
@@ -520,73 +519,72 @@
   .meta-k {
     width: 76px;
     color: var(--text-muted);
-    font-weight: 600;
-  }
-  .meta-v {
-    color: var(--text-white);
     font-weight: 700;
   }
+  .meta-v {
+    color: var(--text-title);
+    font-weight: 800;
+  }
   .meta-v.highlight {
-    color: var(--cyan);
+    color: var(--orange);
   }
   .meta-v a {
-    color: var(--cyan);
+    color: var(--blue);
     text-decoration: none;
-    border-bottom: 1px dashed rgba(0, 242, 254, 0.4);
+    border-bottom: 1.5px solid var(--blue-border);
   }
   .meta-v.paper {
     font-family: monospace;
-    font-size: 12.5px;
-    color: #FBBF24;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 
   .qr-box {
-    width: 98px;
+    width: 96px;
     display: flex;
     flex-direction: column;
     align-items: center;
     background: #FFFFFF;
     padding: 6px;
-    border-radius: 11px;
-    box-shadow: 0 0 20px rgba(0, 242, 254, 0.35);
+    border-radius: 10px;
+    border: 2px solid var(--orange-border);
+    box-shadow: 0 4px 10px rgba(255, 102, 0, 0.12);
     flex: none;
   }
   .qr-box img {
-    width: 82px;
-    height: 82px;
+    width: 80px;
+    height: 80px;
     display: block;
     object-fit: contain;
   }
   .qr-box span {
     font-size: 9px;
-    color: #0F172A;
-    font-weight: 800;
+    color: var(--text-title);
+    font-weight: 900;
     margin-top: 3px;
     text-align: center;
     line-height: 1.1;
   }
 
   .slogan-banner {
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    margin-top: 7px;
+    padding-top: 7px;
+    border-top: 1.5px solid var(--border-light);
     display: flex;
     justify-content: space-between;
     align-items: center;
   }
   .slogan-cn {
     font-size: 14px;
-    font-weight: 800;
-    background: linear-gradient(90deg, #FCD34D, #00F2FE);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    letter-spacing: 0.05em;
+    font-weight: 900;
+    color: var(--orange);
+    letter-spacing: 0.04em;
   }
   .slogan-en {
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-size: 11.5px;
-    font-weight: 500;
-    letter-spacing: 0.04em;
+    font-weight: 700;
+    letter-spacing: 0.03em;
   }
 
   /* ===== 打印与高精度导出 (80×180cm) ===== */
@@ -595,7 +593,7 @@
     margin: 0;
   }
   @media print {
-    body { background: #070B14; }
+    body { background: #FFFFFF; }
     .poster {
       width: 80cm;
       height: 180cm;
@@ -611,7 +609,7 @@
   <main class="poster">
     <div class="content-layer">
 
-      <!-- 1. 顶部活动荣誉条 -->
+      <!-- 1. 顶部活动荣誉条（亮橙与亮绿微标） -->
       <header class="topbar">
         <div class="event-badge">
           <div class="event-logo-box">BOHACK 2026</div>
@@ -626,7 +624,7 @@
       <!-- 2. Hero 标题与强定位区 -->
       <section class="hero">
         <div class="tagline-eyebrow">
-          <div class="pulse"></div>
+          <div class="badge-dot"></div>
           <span>42 小时现场极限重构 · Windows 原生单机自进化 AI Agent</span>
         </div>
         <h1 class="main-title">AlterEgo</h1>
@@ -637,57 +635,55 @@
         </p>
       </section>
 
-      <!-- 3. 42小时核心硬核指标看板 (DO IT BETTER 核心成果) -->
+      <!-- 3. 42小时核心硬核指标看板 (DO IT BETTER 亮橙亮绿醒目看板) -->
       <section class="metric-board">
-        <div class="metric-item c1">
+        <div class="metric-item c-orange">
           <div class="metric-val">+41,869</div>
           <div class="metric-lbl">现场代码净增</div>
           <div class="metric-sub">净增 273 文件 (+84%)</div>
         </div>
-        <div class="metric-item c2">
+        <div class="metric-item c-green">
           <div class="metric-val">0.15 ms</div>
           <div class="metric-lbl">双级热计算直出</div>
           <div class="metric-sub">感知提速 1800+ 倍</div>
         </div>
-        <div class="metric-item c3">
+        <div class="metric-item c-blue">
           <div class="metric-val">0 ms / 100%</div>
           <div class="metric-lbl">403 零延迟自愈</div>
           <div class="metric-sub">额度耗尽自动切流</div>
         </div>
-        <div class="metric-item c4">
+        <div class="metric-item c-purple">
           <div class="metric-val">98%</div>
           <div class="metric-lbl">SPA 真实发包率</div>
           <div class="metric-sub">瞬态 SoM + 原生事件</div>
         </div>
       </section>
 
-      <!-- 4. 高保真真机实测工作台展区（用户指定真机实测大图） -->
+      <!-- 4. 高保真真机实测工作台展区（现场真机大图） -->
       <section class="shot-wrap">
-        <div class="shot-inner">
-          <div class="shot-header">
-            <div class="shot-dots">
-              <div class="shot-dot r"></div>
-              <div class="shot-dot y"></div>
-              <div class="shot-dot g"></div>
-            </div>
-            <div class="shot-status-badge">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-              <span>现场真机实测 · 浏览器瞬态 SoM 视觉标记 + 微信移动端双向协同</span>
-            </div>
+        <div class="shot-header">
+          <div class="shot-dots">
+            <div class="shot-dot r"></div>
+            <div class="shot-dot y"></div>
+            <div class="shot-dot g"></div>
           </div>
-          <img class="shot-img" src="assets/live_demo.jpg" alt="AlterEgo 现场真机实测录屏：浏览器 SoM 视觉标记与微信协同">
+          <div class="shot-status-badge">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            <span>现场真机实测 · 浏览器瞬态 SoM 视觉标记 + 微信移动端双向协同</span>
+          </div>
         </div>
+        <img class="shot-img" src="assets/live_demo.jpg" alt="AlterEgo 现场真机实测录屏：浏览器 SoM 视觉标记与微信协同">
       </section>
 
-      <!-- 5. 核心四大能力矩阵（多色彩高对比高亮卡片） -->
+      <!-- 5. 核心四大能力矩阵（亮橙与亮绿高对比） -->
       <div class="section-tag">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-        <span>42 小时现场技术突破 · 四大核心战役</span>
+        <div class="section-tag-badge">42H 现场技术突破</div>
+        <span>四大核心战役 · 全量自研硬核实现</span>
       </div>
 
       <section class="grid">
-        <!-- 卡片 1：极速青蓝 (双级热计算体系) -->
-        <div class="card card-cyan">
+        <!-- 卡片 1：亮绿色 (双级热计算体系) -->
+        <div class="card card-green">
           <div class="card-top">
             <div class="card-icon">
               <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -702,8 +698,8 @@
           </p>
         </div>
 
-        <!-- 卡片 2：琥珀金橙 (多云协同与403自愈) -->
-        <div class="card card-amber">
+        <!-- 卡片 2：亮橙色 (多云协同与403自愈) -->
+        <div class="card card-orange">
           <div class="card-top">
             <div class="card-icon">
               <svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>
@@ -718,8 +714,8 @@
           </p>
         </div>
 
-        <!-- 卡片 3：翡翠明绿 (微信 ClawBot 移动端审批闭环) -->
-        <div class="card card-emerald">
+        <!-- 卡片 3：清新青绿 (微信移动端审批闭环) -->
+        <div class="card card-green">
           <div class="card-top">
             <div class="card-icon">
               <svg viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="3"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
@@ -734,8 +730,8 @@
           </p>
         </div>
 
-        <!-- 卡片 4：极光霓紫 (沙箱硬隔离与自进化) -->
-        <div class="card card-violet">
+        <!-- 卡片 4：优雅亮紫 (沙箱硬隔离与自进化) -->
+        <div class="card card-purple">
           <div class="card-top">
             <div class="card-icon">
               <svg viewBox="0 0 24 24"><path d="M12 2a8 8 0 0 0-8 8c0 3.3 2 6.2 5 7.4V20a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-2.6c3-1.2 5-4.1 5-7.4a8 8 0 0 0-8-8z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>
@@ -758,14 +754,14 @@
           <span class="tech-highlight">1,847+ 安全与性能防护用例</span>
         </div>
         <div class="chips">
-          <span class="chip c-blue">Python 3.12</span>
-          <span class="chip c-blue">双级 L1 内存热计算</span>
-          <span class="chip c-blue">300s HTTP Keep-Alive</span>
-          <span class="chip c-amber">联通云 MiniMax-M2.5</span>
-          <span class="chip c-amber">阿里百炼 Qwen3.8 / Kimi</span>
-          <span class="chip c-amber">403 零延迟自愈降级</span>
-          <span class="chip c-green">Playwright 原生事件链</span>
-          <span class="chip c-green">瞬态 SoM 视觉标记</span>
+          <span class="chip c-green">Python 3.12</span>
+          <span class="chip c-green">双级 L1 内存热计算</span>
+          <span class="chip c-green">300s HTTP Keep-Alive</span>
+          <span class="chip c-orange">联通云 MiniMax-M2.5</span>
+          <span class="chip c-orange">阿里百炼 Qwen3.8 / Kimi</span>
+          <span class="chip c-orange">403 零延迟自愈降级</span>
+          <span class="chip c-blue">Playwright 原生事件链</span>
+          <span class="chip c-blue">瞬态 SoM 视觉标记</span>
           <span class="chip c-green">微信 ClawBot / iLink</span>
           <span class="chip c-purple">Windows UIA 桌面控制</span>
           <span class="chip c-purple">SQLite WAL 增量检查点</span>
@@ -795,7 +791,7 @@
             </div>
           </div>
 
-          <!-- 评委与现场观众扫码直达 -->
+          <!-- 评委现场扫码 -->
           <div class="qr-box">
             <img src="assets/repo_qr.png" alt="GitHub 仓库二维码">
             <span>扫码看 42h<br>提交记录</span>
