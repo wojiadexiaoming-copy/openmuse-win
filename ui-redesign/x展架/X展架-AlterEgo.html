@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlterEgo · BoHack 2026 X 展架（80×180cm 极客极光高亮版）</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%2300F2FE'/><text x='12' y='17' font-size='14' font-family='sans-serif' font-weight='800' fill='%23070B14' text-anchor='middle'>A</text></svg>">
+<style>
+  :root {
+    /* 核心夜幕与极光背景体系 */
+    --bg-deep: #070B14;
+    --bg-card: rgba(15, 23, 42, 0.75);
+    
+    /* 强冲击主题色 */
+    --cyan: #00F2FE;
+    --blue: #38BDF8;
+    --indigo: #6366F1;
+    --violet: #A855F7;
+    --emerald: #10B981;
+    --amber: #F59E0B;
+    
+    /* 文字层次 */
+    --text-white: #FFFFFF;
+    --text-silver: #E2E8F0;
+    --text-muted: #94A3B8;
+    --text-faint: #64748B;
+    
+    /* 边框与光效 */
+    --border-glass: rgba(255, 255, 255, 0.12);
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: #020408;
+    color: var(--text-white);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 成品标准展架尺寸：80cm × 180cm (10px/cm => 800×1800px) */
+  .poster {
+    width: 800px;
+    height: 1800px;
+    background: radial-gradient(circle at 15% 10%, rgba(0, 242, 254, 0.18) 0%, transparent 40%),
+                radial-gradient(circle at 85% 32%, rgba(168, 85, 247, 0.18) 0%, transparent 40%),
+                radial-gradient(circle at 12% 65%, rgba(16, 185, 129, 0.14) 0%, transparent 42%),
+                radial-gradient(circle at 88% 85%, rgba(245, 158, 11, 0.14) 0%, transparent 38%),
+                linear-gradient(180deg, #070B14 0%, #0B1222 35%, #080D1A 70%, #050810 100%);
+    display: flex;
+    flex-direction: column;
+    padding: 32px 42px 30px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85);
+  }
+
+  /* 极客网格纹理底纹 */
+  .poster::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-image: 
+      linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+    background-size: 30px 30px;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .content-layer {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    justify-content: space-between;
+  }
+
+  /* ===== 1. 顶部活动荣誉条 ===== */
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    flex: none;
+  }
+  .topbar .event-badge {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: nowrap;
+  }
+  .event-logo-box {
+    background: linear-gradient(135deg, #00F2FE, #4FACFE);
+    color: #070B14;
+    font-weight: 900;
+    font-size: 13px;
+    padding: 3px 9px;
+    border-radius: 6px;
+    letter-spacing: 0.06em;
+    flex: none;
+  }
+  .event-name {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-white);
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+  .track-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.45);
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #FCD34D;
+    white-space: nowrap;
+  }
+  .track-pill .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #F59E0B;
+    box-shadow: 0 0 8px #F59E0B;
+    flex: none;
+  }
+
+  /* ===== 2. Hero 醒目标题区 ===== */
+  .hero {
+    padding: 14px 0 10px;
+    flex: none;
+  }
+  .tagline-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(0, 242, 254, 0.12);
+    border: 1px solid rgba(0, 242, 254, 0.35);
+    padding: 5px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--cyan);
+    letter-spacing: 0.04em;
+    margin-bottom: 10px;
+    box-shadow: 0 0 14px rgba(0, 242, 254, 0.15);
+  }
+  .tagline-eyebrow .pulse {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 8px var(--cyan);
+    animation: blink 2s infinite;
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.85); }
+  }
+
+  .main-title {
+    font-size: 92px;
+    font-weight: 900;
+    line-height: 0.95;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, #FFFFFF 0%, #F1F5F9 45%, #38BDF8 75%, #00F2FE 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 4px 18px rgba(0, 242, 254, 0.30));
+  }
+  .subtitle-en {
+    margin-top: 8px;
+    font-size: 19px;
+    color: var(--text-muted);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+  .hero-claim {
+    margin-top: 10px;
+    font-size: 24px;
+    line-height: 1.35;
+    font-weight: 700;
+    color: var(--text-silver);
+  }
+  .hero-claim strong {
+    background: linear-gradient(90deg, #00F2FE, #38BDF8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero-claim em {
+    font-style: normal;
+    background: linear-gradient(90deg, #FCD34D, #F59E0B);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  /* ===== 3. 42小时核心硬核指标看板 (DO IT BETTER) ===== */
+  .metric-board {
+    margin: 8px 0 14px;
+    background: rgba(15, 23, 42, 0.70);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 16px;
+    padding: 12px 16px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+    flex: none;
+  }
+  .metric-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 6px 4px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    position: relative;
+    overflow: hidden;
+  }
+  .metric-item::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 3px;
+  }
+  .metric-item.c1::before { background: var(--cyan); box-shadow: 0 0 10px var(--cyan); }
+  .metric-item.c2::before { background: var(--violet); box-shadow: 0 0 10px var(--violet); }
+  .metric-item.c3::before { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+  .metric-item.c4::before { background: var(--emerald); box-shadow: 0 0 10px var(--emerald); }
+
+  .metric-val {
+    font-size: 28px;
+    font-weight: 900;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+  }
+  .metric-item.c1 .metric-val { color: #00F2FE; text-shadow: 0 0 12px rgba(0,242,254,0.4); }
+  .metric-item.c2 .metric-val { color: #C084FC; text-shadow: 0 0 12px rgba(192,132,252,0.4); }
+  .metric-item.c3 .metric-val { color: #FBBF24; text-shadow: 0 0 12px rgba(251,191,36,0.4); }
+  .metric-item.c4 .metric-val { color: #34D399; text-shadow: 0 0 12px rgba(52,211,153,0.4); }
+
+  .metric-lbl {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-white);
+    margin-top: 3px;
+    letter-spacing: 0.02em;
+  }
+  .metric-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  /* ===== 4. 高保真工作台界面展区 ===== */
+  .shot-wrap {
+    margin: 2px 0 16px;
+    background: linear-gradient(135deg, rgba(0, 242, 254, 0.25) 0%, rgba(168, 85, 247, 0.20) 50%, rgba(255, 255, 255, 0.08) 100%);
+    border-radius: 18px;
+    padding: 2.5px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.7);
+    flex: none;
+  }
+  .shot-inner {
+    background: #0D1527;
+    border-radius: 15px;
+    overflow: hidden;
+    position: relative;
+  }
+  .shot-header {
+    background: rgba(15, 23, 42, 0.95);
+    padding: 7px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .shot-dots {
+    display: flex;
+    gap: 5px;
+  }
+  .shot-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+  }
+  .shot-dot.r { background: #EF4444; }
+  .shot-dot.y { background: #F59E0B; }
+  .shot-dot.g { background: #10B981; }
+  .shot-status-badge {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--cyan);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .shot-img {
+    width: 100%;
+    max-height: 275px;
+    object-fit: cover;
+    object-position: top;
+    display: block;
+  }
+
+  /* ===== 5. 核心四大能力矩阵（多色彩高对比高亮卡片） ===== */
+  .section-tag {
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--cyan);
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex: none;
+  }
+  .section-tag::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(0, 242, 254, 0.4), transparent);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 13px;
+    margin-bottom: 14px;
+    flex: none;
+  }
+  .card {
+    background: var(--bg-card);
+    backdrop-filter: blur(10px);
+    border-radius: 16px;
+    padding: 16px 16px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    border: 1px solid var(--border-glass);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+  }
+  
+  /* 四大卡片独立专属光效与强调色 */
+  .card.card-cyan {
+    border-color: rgba(0, 242, 254, 0.35);
+    background: linear-gradient(145deg, rgba(0, 242, 254, 0.08) 0%, rgba(15, 23, 42, 0.85) 100%);
+  }
+  .card.card-amber {
+    border-color: rgba(245, 158, 11, 0.35);
+    background: linear-gradient(145deg, rgba(245, 158, 11, 0.08) 0%, rgba(15, 23, 42, 0.85) 100%);
+  }
+  .card.card-emerald {
+    border-color: rgba(16, 185, 129, 0.35);
+    background: linear-gradient(145deg, rgba(16, 185, 129, 0.08) 0%, rgba(15, 23, 42, 0.85) 100%);
+  }
+  .card.card-violet {
+    border-color: rgba(168, 85, 247, 0.35);
+    background: linear-gradient(145deg, rgba(168, 85, 247, 0.08) 0%, rgba(15, 23, 42, 0.85) 100%);
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 9px;
+  }
+  .card-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+  }
+  .card.card-cyan .card-icon {
+    background: rgba(0, 242, 254, 0.16);
+    box-shadow: 0 0 14px rgba(0, 242, 254, 0.25);
+  }
+  .card.card-cyan .card-icon svg { stroke: #00F2FE; }
+
+  .card.card-amber .card-icon {
+    background: rgba(245, 158, 11, 0.16);
+    box-shadow: 0 0 14px rgba(245, 158, 11, 0.25);
+  }
+  .card.card-amber .card-icon svg { stroke: #F59E0B; }
+
+  .card.card-emerald .card-icon {
+    background: rgba(16, 185, 129, 0.16);
+    box-shadow: 0 0 14px rgba(16, 185, 129, 0.25);
+  }
+  .card.card-emerald .card-icon svg { stroke: #10B981; }
+
+  .card.card-violet .card-icon {
+    background: rgba(168, 85, 247, 0.16);
+    box-shadow: 0 0 14px rgba(168, 85, 247, 0.25);
+  }
+  .card.card-violet .card-icon svg { stroke: #A855F7; }
+
+  .card-icon svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke-width: 2.1;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .card-titles {
+    display: flex;
+    flex-direction: column;
+  }
+  .card-badge {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .card.card-cyan .card-badge { color: #38BDF8; }
+  .card.card-amber .card-badge { color: #FBBF24; }
+  .card.card-emerald .card-badge { color: #34D399; }
+  .card.card-violet .card-badge { color: #C084FC; }
+
+  .card h3 {
+    font-size: 19px;
+    font-weight: 800;
+    color: var(--text-white);
+    letter-spacing: -0.01em;
+  }
+  .card p {
+    font-size: 14.5px;
+    line-height: 1.48;
+    color: var(--text-silver);
+  }
+  .card p b {
+    color: var(--text-white);
+    font-weight: 700;
+  }
+
+  /* ===== 6. 技术栈多彩微徽章 ===== */
+  .stack-box {
+    background: rgba(15, 23, 42, 0.60);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 14px;
+    padding: 12px 16px;
+    margin-bottom: 14px;
+    flex: none;
+  }
+  .stack-header {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-muted);
+    letter-spacing: 0.06em;
+    margin-bottom: 9px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .stack-header span.tech-highlight {
+    color: var(--cyan);
+    font-weight: 800;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+  .chip {
+    font-size: 13.5px;
+    font-weight: 700;
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-silver);
+  }
+  .chip.c-blue { border-color: rgba(56,189,248,0.4); background: rgba(56,189,248,0.1); color: #38BDF8; }
+  .chip.c-amber { border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.1); color: #FBBF24; }
+  .chip.c-green { border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.1); color: #34D399; }
+  .chip.c-purple { border-color: rgba(168,85,247,0.4); background: rgba(168,85,247,0.1); color: #C084FC; }
+
+  /* ===== 7. 底部展台信息与现场扫码区 ===== */
+  .footer {
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.88) 0%, rgba(9, 14, 26, 0.98) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 18px;
+    padding: 16px 20px 14px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+    flex: none;
+  }
+  .footer-body {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+  }
+  .footer-meta {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .meta-row {
+    display: flex;
+    align-items: center;
+    font-size: 14px;
+  }
+  .meta-k {
+    width: 80px;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .meta-v {
+    color: var(--text-white);
+    font-weight: 700;
+  }
+  .meta-v.highlight {
+    color: var(--cyan);
+  }
+  .meta-v a {
+    color: var(--cyan);
+    text-decoration: none;
+    border-bottom: 1px dashed rgba(0, 242, 254, 0.4);
+  }
+  .meta-v.paper {
+    font-family: monospace;
+    font-size: 13px;
+    color: #FBBF24;
+  }
+
+  .qr-box {
+    width: 104px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #FFFFFF;
+    padding: 7px;
+    border-radius: 12px;
+    box-shadow: 0 0 20px rgba(0, 242, 254, 0.35);
+    flex: none;
+  }
+  .qr-box img {
+    width: 88px;
+    height: 88px;
+    display: block;
+    object-fit: contain;
+  }
+  .qr-box span {
+    font-size: 9.5px;
+    color: #0F172A;
+    font-weight: 800;
+    margin-top: 3px;
+    text-align: center;
+    line-height: 1.1;
+  }
+
+  .slogan-banner {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .slogan-cn {
+    font-size: 14.5px;
+    font-weight: 800;
+    background: linear-gradient(90deg, #FCD34D, #00F2FE);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: 0.05em;
+  }
+  .slogan-en {
+    color: var(--text-faint);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+  }
+
+  /* ===== 打印与高精度导出 (80×180cm) ===== */
+  @page {
+    size: 80cm 180cm;
+    margin: 0;
+  }
+  @media print {
+    body { background: #070B14; }
+    .poster {
+      width: 80cm;
+      height: 180cm;
+      box-shadow: none;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+  }
+</style>
+</head>
+<body>
+
+  <main class="poster">
+    <div class="content-layer">
+
+      <!-- 1. 顶部活动荣誉条 -->
+      <header class="topbar">
+        <div class="event-badge">
+          <div class="event-logo-box">BOHACK 2026</div>
+          <div class="event-name">天津青年黑客松 · 游园会展位</div>
+        </div>
+        <div class="track-pill">
+          <div class="dot"></div>
+          <span>TS2 · 另一个我·日新主题赛道 (Do It Better)</span>
+        </div>
+      </header>
+
+      <!-- 2. Hero 标题与强定位区 -->
+      <section class="hero">
+        <div class="tagline-eyebrow">
+          <div class="pulse"></div>
+          <span>42 小时现场极限重构 · Windows 原生单机自进化 AI Agent</span>
+        </div>
+        <h1 class="main-title">AlterEgo</h1>
+        <div class="subtitle-en">AlterEgo: Towards the Zero-Cost Self-Evolving Personal Agent</div>
+        <p class="hero-claim">
+          大脑直连<strong>多云商业模型矩阵</strong>，
+          <em>执行与隐私永远留在你的本机</em>。
+        </p>
+      </section>
+
+      <!-- 3. 42小时核心硬核指标看板 (DO IT BETTER 核心成果) -->
+      <section class="metric-board">
+        <div class="metric-item c1">
+          <div class="metric-val">+41,869</div>
+          <div class="metric-lbl">现场代码净增</div>
+          <div class="metric-sub">净增 273 文件 (+84%)</div>
+        </div>
+        <div class="metric-item c2">
+          <div class="metric-val">0.15 ms</div>
+          <div class="metric-lbl">双级热计算直出</div>
+          <div class="metric-sub">感知提速 1800+ 倍</div>
+        </div>
+        <div class="metric-item c3">
+          <div class="metric-val">0 ms / 100%</div>
+          <div class="metric-lbl">403 零延迟自愈</div>
+          <div class="metric-sub">额度耗尽自动切流</div>
+        </div>
+        <div class="metric-item c4">
+          <div class="metric-val">98%</div>
+          <div class="metric-lbl">SPA 真实发包率</div>
+          <div class="metric-sub">瞬态 SoM + 原生事件</div>
+        </div>
+      </section>
+
+      <!-- 4. 高保真工作台界面展区 -->
+      <section class="shot-wrap">
+        <div class="shot-inner">
+          <div class="shot-header">
+            <div class="shot-dots">
+              <div class="shot-dot r"></div>
+              <div class="shot-dot y"></div>
+              <div class="shot-dot g"></div>
+            </div>
+            <div class="shot-status-badge">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+              <span>六态实时流式感知 · 35格真实目录价用量热力看板</span>
+            </div>
+          </div>
+          <img class="shot-img" src="assets/workbench.jpg" alt="AlterEgo 现代高保真工作台原型">
+        </div>
+      </section>
+
+      <!-- 5. 核心四大能力矩阵（多色彩高对比高亮卡片） -->
+      <div class="section-tag">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        <span>42 小时现场技术突破 · 四大核心战役</span>
+      </div>
+
+      <section class="grid">
+        <!-- 卡片 1：极速青蓝 (双级热计算体系) -->
+        <div class="card card-cyan">
+          <div class="card-top">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            </div>
+            <div class="card-titles">
+              <span class="card-badge">独创自研 · 极速计算</span>
+              <h3>双级热计算体系</h3>
+            </div>
+          </div>
+          <p>
+            工具调用级 <b>L1 内存热计算缓存</b> 结合 <b>300s 长连接池</b>，只读探测工具 <b>0.15ms 直出</b>（提速 1800+ 倍）；键鼠写操作精准解耦失效，彻底消除 3.2s 冷启动握手。
+          </p>
+        </div>
+
+        <!-- 卡片 2：琥珀金橙 (多云协同与403自愈) -->
+        <div class="card card-amber">
+          <div class="card-top">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>
+            </div>
+            <div class="card-titles">
+              <span class="card-badge">商业多云 · 容灾接管</span>
+              <h3>403 零延迟自愈降级</h3>
+            </div>
+          </div>
+          <p>
+            直连<b>联通云</b>（MiniMax-M2.5 / DeepSeek-V4）与<b>阿里百炼</b>（Qwen3.8 / Kimi）。内核识别 403 免费配额耗尽硬错误，<b>0ms 跳过无效重试</b>无缝转移下游健康模型。
+          </p>
+        </div>
+
+        <!-- 卡片 3：翡翠明绿 (微信 ClawBot 移动端审批闭环) -->
+        <div class="card card-emerald">
+          <div class="card-top">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="3"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+            </div>
+            <div class="card-titles">
+              <span class="card-badge">离机掌控 · 双向授权</span>
+              <h3>微信移动端审批闭环</h3>
+            </div>
+          </div>
+          <p>
+            微信扫码绑定，原生 <b>iLink 长轮询</b>；终端特权命令、批量文件修改等高危动作<b>秒级推手机审批卡片</b>，手机微信点放行，本地无缝解锁执行，离机依然安心。
+          </p>
+        </div>
+
+        <!-- 卡片 4：极光霓紫 (沙箱硬隔离与自进化) -->
+        <div class="card card-violet">
+          <div class="card-top">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M12 2a8 8 0 0 0-8 8c0 3.3 2 6.2 5 7.4V20a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-2.6c3-1.2 5-4.1 5-7.4a8 8 0 0 0-8-8z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>
+            </div>
+            <div class="card-titles">
+              <span class="card-badge">沙箱隔离 · 终身进化</span>
+              <h3>进程硬隔离与技能蒸馏</h3>
+            </div>
+          </div>
+          <p>
+            子智能体独立 <b>multiprocessing 进程沙箱</b>，配内存看门狗与强杀回收；高频成功交互<b>自动蒸馏 Reusable Skill 技能包</b>，夜间自反思剪枝，长期运行永不退化。
+          </p>
+        </div>
+      </section>
+
+      <!-- 6. 技术栈微徽章体系 -->
+      <section class="stack-box">
+        <div class="stack-header">
+          <span>硬核全栈技术栈 · 42 测试套件 100% 自动化通过</span>
+          <span class="tech-highlight">1,847+ 安全与性能防护用例</span>
+        </div>
+        <div class="chips">
+          <span class="chip c-blue">Python 3.12</span>
+          <span class="chip c-blue">双级 L1 内存热计算</span>
+          <span class="chip c-blue">300s HTTP Keep-Alive</span>
+          <span class="chip c-amber">联通云 MiniMax-M2.5</span>
+          <span class="chip c-amber">阿里百炼 Qwen3.8 / Kimi</span>
+          <span class="chip c-amber">403 零延迟自愈降级</span>
+          <span class="chip c-green">Playwright 原生事件链</span>
+          <span class="chip c-green">瞬态 SoM 视觉标记</span>
+          <span class="chip c-green">微信 ClawBot / iLink</span>
+          <span class="chip c-purple">Windows UIA 桌面控制</span>
+          <span class="chip c-purple">SQLite WAL 增量检查点</span>
+          <span class="chip c-purple">HMAC-SHA256 机密保险箱</span>
+        </div>
+      </section>
+
+      <!-- 7. 底部展台信息与现场扫码区 -->
+      <footer class="footer">
+        <div class="footer-body">
+          <div class="footer-meta">
+            <div class="meta-row">
+              <div class="meta-k">参赛赛道</div>
+              <div class="meta-v highlight">TS2 · 另一个我·日新主题赛道 (Do It Better)</div>
+            </div>
+            <div class="meta-row">
+              <div class="meta-k">项目成员</div>
+              <div class="meta-v">石浩明（全栈独立架构与实现）</div>
+            </div>
+            <div class="meta-row">
+              <div class="meta-k">开源仓库</div>
+              <div class="meta-v"><a href="https://github.com/wojiadexiaoming-copy/openmuse-win">github.com/wojiadexiaoming-copy/openmuse-win</a></div>
+            </div>
+            <div class="meta-row">
+              <div class="meta-k">理论论文</div>
+              <div class="meta-v paper">Zenodo DOI: 10.5281/zenodo.23446166</div>
+            </div>
+          </div>
+
+          <!-- 评委与现场观众扫码直达 -->
+          <div class="qr-box">
+            <img src="assets/repo_qr.png" alt="GitHub 仓库二维码">
+            <span>扫码看 42h<br>提交记录</span>
+          </div>
+        </div>
+
+        <div class="slogan-banner">
+          <div class="slogan-cn">生生不息，每一次重来，都是一次进化。</div>
+          <div class="slogan-en">Renew · Built for Better · BoHack 2026</div>
+        </div>
+      </footer>
+
+    </div>
+  </main>
+
+</body>
+</html>
