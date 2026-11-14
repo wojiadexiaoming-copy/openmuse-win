@@ -197,7 +197,7 @@
     font-weight: 900;
   }
 
-  /* ===== 3. 四大核心王牌看板 (突显真正干货，拒绝虚行数与小错误码) ===== */
+  /* ===== 3. 四大核心王牌看板 ===== */
   .metric-board {
     margin: 4px 0 10px;
     display: grid;
@@ -325,7 +325,7 @@
     background: #F8FAFC;
   }
 
-  /* ===== 5. 核心四大能力矩阵（硬核实力干货展开） ===== */
+  /* ===== 5. 核心四大能力矩阵 ===== */
   .section-tag {
     font-size: 15px;
     font-weight: 900;
@@ -502,12 +502,12 @@
   .chip.c-blue { border-color: var(--blue-border); background: var(--blue-soft); color: var(--blue); }
   .chip.c-purple { border-color: var(--purple-border); background: var(--purple-soft); color: var(--purple); }
 
-  /* ===== 7. 底部展台信息与现场扫码区 ===== */
+  /* ===== 7. 底部展台信息与现场双二维码区（GitHub + 微信） ===== */
   .footer {
     background: #F8FAFC;
     border: 2px solid var(--border-card);
     border-radius: 16px;
-    padding: 13px 18px 11px;
+    padding: 12px 18px 10px;
     box-shadow: var(--shadow-sm);
     flex: none;
   }
@@ -515,7 +515,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 16px;
+    gap: 14px;
   }
   .footer-meta {
     flex: 1;
@@ -529,7 +529,7 @@
     font-size: 13.5px;
   }
   .meta-k {
-    width: 76px;
+    width: 74px;
     color: var(--text-muted);
     font-weight: 700;
   }
@@ -547,54 +547,71 @@
   }
   .meta-v.paper {
     font-family: monospace;
-    font-size: 12px;
+    font-size: 11.5px;
     color: var(--text-secondary);
   }
 
+  /* 双二维码展示组（GitHub 仓库 + 作者微信） */
+  .qr-group {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex: none;
+  }
   .qr-box {
-    width: 96px;
+    width: 86px;
     display: flex;
     flex-direction: column;
     align-items: center;
     background: #FFFFFF;
-    padding: 6px;
-    border-radius: 10px;
-    border: 2px solid var(--orange-border);
-    box-shadow: 0 4px 10px rgba(255, 102, 0, 0.12);
+    padding: 5px;
+    border-radius: 9px;
+    box-shadow: 0 3px 8px rgba(15, 23, 42, 0.08);
     flex: none;
   }
+  .qr-box.qr-repo {
+    border: 2px solid var(--orange-border);
+  }
+  .qr-box.qr-wechat {
+    border: 2px solid var(--green-border);
+  }
   .qr-box img {
-    width: 80px;
-    height: 80px;
+    width: 72px;
+    height: 72px;
     display: block;
     object-fit: contain;
   }
   .qr-box span {
-    font-size: 9px;
-    color: var(--text-title);
+    font-size: 8.5px;
     font-weight: 900;
     margin-top: 3px;
     text-align: center;
-    line-height: 1.1;
+    line-height: 1.15;
+  }
+  .qr-box.qr-repo span {
+    color: var(--orange-dark);
+  }
+  .qr-box.qr-wechat span {
+    color: var(--green);
   }
 
   .slogan-banner {
     margin-top: 7px;
-    padding-top: 7px;
+    padding-top: 6px;
     border-top: 1.5px solid var(--border-light);
     display: flex;
     justify-content: space-between;
     align-items: center;
   }
   .slogan-cn {
-    font-size: 14px;
+    font-size: 13.5px;
     font-weight: 900;
     color: var(--orange);
     letter-spacing: 0.04em;
   }
   .slogan-en {
     color: var(--text-muted);
-    font-size: 11.5px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.03em;
   }
@@ -647,7 +664,7 @@
         </p>
       </section>
 
-      <!-- 3. 四大核心王牌看板 (硬核干货能力，拒绝虚代码行数与小错误码) -->
+      <!-- 3. 四大核心王牌看板 -->
       <section class="metric-board">
         <div class="metric-item c-orange">
           <span class="tag-pill">具身跨端</span>
@@ -675,7 +692,7 @@
         </div>
       </section>
 
-      <!-- 4. 高保真真机实测工作台展区（现场真机大图） -->
+      <!-- 4. 高保真真机实测工作台展区 -->
       <section class="shot-wrap">
         <div class="shot-header">
           <div class="shot-dots">
@@ -691,7 +708,7 @@
         <img class="shot-img" src="assets/live_demo.jpg" alt="AlterEgo 现场真机实测录屏：浏览器 SoM 视觉标记与微信协同">
       </section>
 
-      <!-- 5. 核心四大能力矩阵（硬核实力干货展开） -->
+      <!-- 5. 核心四大能力矩阵 -->
       <div class="section-tag">
         <div class="section-tag-badge">技术攻坚突破</div>
         <span>四大核心支柱 · 直击大赛「日新 / Do It Better」核心考察</span>
@@ -785,7 +802,7 @@
         </div>
       </section>
 
-      <!-- 7. 底部展台信息与现场扫码区 -->
+      <!-- 7. 底部展台信息与现场双二维码区（GitHub + 微信） -->
       <footer class="footer">
         <div class="footer-body">
           <div class="footer-meta">
@@ -807,10 +824,16 @@
             </div>
           </div>
 
-          <!-- 评委现场扫码 -->
-          <div class="qr-box">
-            <img src="assets/repo_qr.png" alt="GitHub 仓库二维码">
-            <span>扫码看 42h<br>提交记录</span>
+          <!-- 双二维码：GitHub 开源 + 作者微信扫码 -->
+          <div class="qr-group">
+            <div class="qr-box qr-repo">
+              <img src="assets/repo_qr.png" alt="GitHub 仓库二维码">
+              <span>GitHub 源码<br>42h 提交记录</span>
+            </div>
+            <div class="qr-box qr-wechat">
+              <img src="assets/wechat_qr.png" alt="作者微信二维码">
+              <span>现场微信交流<br>扫码添加作者</span>
+            </div>
           </div>
         </div>
 
